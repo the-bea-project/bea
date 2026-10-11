@@ -38,3 +38,28 @@ pub fn end_to_end_transpiler_test() {
   output
   |> should.equal(expected)
 }
+
+pub fn list_transpiler_test() {
+  let source =
+    "
+    def get_roles() {
+      roles = [\"admin\", \"user\", \"guest\"]
+      return roles
+    }
+  "
+
+  let output =
+    source
+    |> lexer.tokenize()
+    |> parser.parse()
+    |> codegen.generate()
+
+  let expected =
+    "pub fn get_roles() {
+      let roles = [\"admin\", \"user\", \"guest\"]
+      roles
+    }"
+
+  output
+  |> should.equal(expected)
+}

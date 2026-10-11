@@ -8,6 +8,8 @@ pub type Expr {
   CallExpr(name: String, args: List(Expr))
   // Binary operations (e.g., left + right)
   BinaryExpr(left: Expr, op: String, right: Expr)
+  // A list of expressions, e.g., [1, 2, 3]
+  ListExpr(elements: List(Expr))
 }
 
 pub type Statement {

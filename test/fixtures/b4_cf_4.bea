@@ -1,0 +1,12 @@
+def calculate_score(points, bonus) {
+  total = points + bonus
+  if total > 100 {
+    return "high_score"
+  }
+
+  if total != 1 {
+    return "something"
+  }
+
+ "try_again"
+}

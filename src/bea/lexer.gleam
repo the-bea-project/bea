@@ -51,6 +51,8 @@ pub type Token {
   Ampersand
   Underscore
   Comma
+  EqEq
+  BangEq
 
   // --- Delimiters ---
   LBrace
@@ -101,6 +103,8 @@ fn scan(chars: List(String), tokens: List(Token)) {
 
     // Two-character operators
     ["|", ">", ..rest] -> scan(rest, [PipeRight, ..tokens])
+    ["!", "=", ..rest] -> scan(rest, [BangEq, ..tokens])
+    ["=", "=", ..rest] -> scan(rest, [EqEq, ..tokens])
 
     // Lower precendence single-character symbols
     ["!", ..rest] -> scan(rest, [Bang, ..tokens])

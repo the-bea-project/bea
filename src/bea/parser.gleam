@@ -47,6 +47,12 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       #(ast.CallExpr(name, args), after_args)
     }
 
+    // Intercept Lists
+    [lexer.LBracket, ..rest] -> {
+      let #(elements, after_elements) = parse_list_elements(rest, [])
+      #(ast.ListExpr(elements), after_elements)
+    }
+
     [lexer.Ident(name), ..rest] -> #(ast.IdentExpr(name), rest)
 
     _ -> panic as "Syntax Error: Expected an expression"
@@ -70,6 +76,14 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     [lexer.Greater, ..rest] -> {
       let #(right, after_right) = parse_expression(rest)
       #(ast.BinaryExpr(left, ">", right), after_right)
+    }
+    [lexer.EqEq, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "==", right), after_right)
+    }
+    [lexer.BangEq, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "!=", right), after_right)
     }
 
     // You can add Star (*) and Slash (/) here easily later!
@@ -120,30 +134,8 @@ fn parse_block(
 
     // If / Else statements
     [lexer.If, ..rest] -> {
-      // 1. Parse the condition
-      let #(condition, after_cond) = parse_expression(rest)
-
-      // 2. Expect the opening '{' for the if block
-      case after_cond {
-        [lexer.LBrace, ..after_lbrace] -> {
-          let #(body, after_body) = parse_block(after_lbrace, [])
-
-          // 3. Check if an `else {` block immediately follows
-          case after_body {
-            [lexer.Else, lexer.LBrace, ..after_else_lbrace] -> {
-              let #(else_body, after_else) = parse_block(after_else_lbrace, [])
-              parse_block(after_else, [
-                ast.IfStmt(condition, body, else_body),
-                ..acc
-              ])
-            }
-            // No else block, just continue parsing the outer block
-            _ ->
-              parse_block(after_body, [ast.IfStmt(condition, body, []), ..acc])
-          }
-        }
-        _ -> panic as "Syntax Error: Expected '{' after if condition"
-      }
+      let #(if_stmt, after_if) = parse_if(rest)
+      parse_block(after_if, [if_stmt, ..acc])
     }
 
     // Catch-all: Standalone expression
@@ -174,5 +166,54 @@ fn parse_args(
         _ -> panic as "Syntax Error: Expected ',' or ')' in function arguments"
       }
     }
+  }
+}
+
+fn parse_list_elements(
+  tokens: List(Token),
+  acc: List(ast.Expr),
+) -> #(List(ast.Expr), List(Token)) {
+  case tokens {
+    // Empty list or reached the end
+    [lexer.RBracket, ..rest] -> #(list.reverse(acc), rest)
+
+    // Otherwise, parse an expression
+    _ -> {
+      let #(expr, after_expr) = parse_expression(tokens)
+
+      case after_expr {
+        [lexer.Comma, ..rest] -> parse_list_elements(rest, [expr, ..acc])
+        [lexer.RBracket, ..rest] -> #(list.reverse([expr, ..acc]), rest)
+        _ -> panic as "Syntax Error: Expected ',' or ']' in list"
+      }
+    }
+  }
+}
+
+fn parse_if(tokens: List(Token)) -> #(ast.Statement, List(Token)) {
+  // 1. Parse condition
+  let #(condition, after_cond) = parse_expression(tokens)
+
+  // 2. Expect '{' and parse body
+  let assert [lexer.LBrace, ..after_lbrace] = after_cond
+  let #(body, after_body) = parse_block(after_lbrace, [])
+
+  // 3. Check what comes after the block
+  case after_body {
+    // NEW: Handle 'else if' by recursively calling parse_if
+    [lexer.Else, lexer.If, ..after_elif] -> {
+      let #(elif_stmt, after_all) = parse_if(after_elif)
+      // Wrap the else-if statement inside a list for the else_body
+      #(ast.IfStmt(condition, body, [elif_stmt]), after_all)
+    }
+
+    // Handle standard 'else {'
+    [lexer.Else, lexer.LBrace, ..after_else_lbrace] -> {
+      let #(else_body, after_else) = parse_block(after_else_lbrace, [])
+      #(ast.IfStmt(condition, body, else_body), after_else)
+    }
+
+    // No else block
+    _ -> #(ast.IfStmt(condition, body, []), after_body)
   }
 }
