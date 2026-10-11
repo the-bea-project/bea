@@ -1,0 +1,30 @@
+{
+  "name": "bea-vscode",
+  "displayName": "Bea Language Support",
+  "description": "Syntax highlighting and language support for Bea",
+  "version": "0.0.1",
+  "publisher": "bea-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "bea",
+        "aliases": ["Bea", "bea"],
+        "extensions": [".bea"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bea",
+        "scopeName": "source.bea",
+        "path": "./syntaxes/bea.tmLanguage.json"
+      }
+    ]
+  }
+}

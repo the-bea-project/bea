@@ -1,0 +1,109 @@
+{
+  "name": "Bea",
+  "scopeName": "source.bea",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#functions" },
+    { "include": "#types" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.bea",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.bea",
+          "match": "\\b(if|else|return|case)\\b"
+        },
+        {
+          "name": "keyword.other.declaration.bea",
+          "match": "\\b(def|pub|import|type)\\b"
+        },
+        {
+          "name": "constant.language.boolean.bea",
+          "match": "\\b(True|False)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b(def)\\s+([a-z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.declaration.bea" },
+            "2": { "name": "entity.name.function.bea" }
+          }
+        },
+        {
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.call.bea" }
+          }
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.bea",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.bea",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.bea",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.bea",
+              "begin": "#\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.interpolation.begin.bea" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.section.interpolation.end.bea" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.integer.bea",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.bea",
+          "match": "(==|!=|>|<|>=|<=|\\|>|<>|=|\\+|-|\\*|/|%|!|:)"
+        }
+      ]
+    }
+  }
+}
