@@ -1,0 +1,7 @@
+def greet(name) {
+  "Hello #{name}!"
+}
+
+def greet2(s1, s2) {
+  "Hi" <> s1 <> s2 <> "!"
+}

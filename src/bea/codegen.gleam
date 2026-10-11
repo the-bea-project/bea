@@ -166,7 +166,7 @@ fn generate_expression(expr: ast.Expr) -> String {
       name <> "(" <> args_str <> ")"
     }
 
-    // NEW: Generate list syntax
+    // Generate list syntax
     ast.ListExpr(elements) -> {
       let elements_str =
         elements |> list.map(generate_expression) |> string.join(", ")

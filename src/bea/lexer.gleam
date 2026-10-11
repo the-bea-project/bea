@@ -53,6 +53,7 @@ pub type Token {
   Comma
   EqEq
   BangEq
+  Concat
 
   // --- Delimiters ---
   LBrace
@@ -102,6 +103,7 @@ fn scan(chars: List(String), tokens: List(Token)) {
     ["}", ..rest] -> scan(rest, [RBrace, ..tokens])
 
     // Two-character operators
+    ["<", ">", ..rest] -> scan(rest, [Concat, ..tokens])
     ["|", ">", ..rest] -> scan(rest, [PipeRight, ..tokens])
     ["!", "=", ..rest] -> scan(rest, [BangEq, ..tokens])
     ["=", "=", ..rest] -> scan(rest, [EqEq, ..tokens])
@@ -157,17 +159,61 @@ fn consume_string(
   tokens: List(Token),
 ) -> List(Token) {
   case chars {
-    // Reached End of File before closing quote (unterminated string)
     [] -> list.reverse([Eof, wrapper(acc), ..tokens])
 
-    // Found a character, check if it is our closing quote
+    // Found closing quote
     [char, ..rest] if char == delimiter -> {
       scan(rest, [wrapper(acc), ..tokens])
     }
 
-    // Otherwise, append the character and keep consuming
+    // NEW: Found interpolation start `#{` inside a double-quoted string
+    ["#", "{", ..rest] if delimiter == "\"" -> {
+      // 1. Extract the characters of the expression inside #{ }
+      let #(inner_chars, after_brace) = extract_until_brace(rest, 0, [])
+
+      // 2. Recursively lex the inner expression
+      let inner_tokens = scan(inner_chars, [])
+
+      // 3. scan() returns the tokens in order ending with Eof. 
+      // We reverse them and drop the Eof so we can inject them into our token stream.
+      let inner_no_eof = case list.reverse(inner_tokens) {
+        [Eof, ..rest_inner] -> rest_inner
+        other -> other
+      }
+
+      // 4. Stitch it together: `acc` <> `inner_expression` <> `...rest of string`
+      let t1 = [wrapper(acc), ..tokens]
+      let t2 = [Concat, ..t1]
+      let t3 = list.append(inner_no_eof, t2)
+      let t4 = [Concat, ..t3]
+
+      // Resume consuming the rest of the string with an empty accumulator
+      consume_string(after_brace, delimiter, "", wrapper, t4)
+    }
+
+    // Normal character (including a `#` that isn't followed by `{`)
     [char, ..rest] ->
       consume_string(rest, delimiter, acc <> char, wrapper, tokens)
+  }
+}
+
+// Helper to grab characters until we find the closing `}`
+fn extract_until_brace(
+  chars: List(String),
+  depth: Int,
+  acc: List(String),
+) -> #(List(String), List(String)) {
+  case chars {
+    [] -> #(list.reverse(acc), [])
+    // Reached EOF safely
+    ["{", ..rest] -> extract_until_brace(rest, depth + 1, ["{", ..acc])
+    ["}", ..rest] -> {
+      case depth == 0 {
+        True -> #(list.reverse(acc), rest)
+        False -> extract_until_brace(rest, depth - 1, ["}", ..acc])
+      }
+    }
+    [char, ..rest] -> extract_until_brace(rest, depth, [char, ..acc])
   }
 }
 

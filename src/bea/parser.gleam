@@ -85,6 +85,10 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       let #(right, after_right) = parse_expression(rest)
       #(ast.BinaryExpr(left, "!=", right), after_right)
     }
+    [lexer.Concat, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "<>", right), after_right)
+    }
 
     // You can add Star (*) and Slash (/) here easily later!
     // 3. If no operator is found, just return the primary expression
@@ -200,7 +204,7 @@ fn parse_if(tokens: List(Token)) -> #(ast.Statement, List(Token)) {
 
   // 3. Check what comes after the block
   case after_body {
-    // NEW: Handle 'else if' by recursively calling parse_if
+    // Handle 'else if' by recursively calling parse_if
     [lexer.Else, lexer.If, ..after_elif] -> {
       let #(elif_stmt, after_all) = parse_if(after_elif)
       // Wrap the else-if statement inside a list for the else_body

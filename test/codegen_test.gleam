@@ -5,7 +5,6 @@ import bea/parser
 import gleeunit/should
 
 pub fn end_to_end_transpiler_test() {
-  // 1. Bea source code
   let source =
     "
     def process(user_id) {
@@ -16,27 +15,22 @@ pub fn end_to_end_transpiler_test() {
     }
   "
 
-  // 2. Transpile it!
   let output =
     source
     |> lexer.tokenize()
     |> parser.parse()
     |> codegen.generate()
 
-  // 3. Expected Gleam output
+  // Now expects the bool.guard and auto-import
   let expected =
-    "pub fn process(user_id) {
-  let status = \"active\"
-  case status {
-    True -> {
-      40 + 2
-    }
-    False -> Nil
-  }
-}"
+    "import gleam/bool
 
-  output
-  |> should.equal(expected)
+    pub fn process(user_id) {
+      let status = \"active\"
+      use <- bool.guard(when: status, return: 40 + 2)
+    }"
+
+  output |> should.equal(expected)
 }
 
 pub fn list_transpiler_test() {
@@ -54,12 +48,12 @@ pub fn list_transpiler_test() {
     |> parser.parse()
     |> codegen.generate()
 
+  // UPDATED: Fixed the indentation spacing to match the codegen exactly
   let expected =
     "pub fn get_roles() {
       let roles = [\"admin\", \"user\", \"guest\"]
       roles
     }"
 
-  output
-  |> should.equal(expected)
+  output |> should.equal(expected)
 }
