@@ -31,6 +31,9 @@ pub type Statement {
 
   // If control flow
   IfStmt(condition: Expr, body: List(Statement), else_body: List(Statement))
+
+  // Echo
+  Echo(expr: Expr)
 }
 
 // A full Bea program is just a list of top-level statements

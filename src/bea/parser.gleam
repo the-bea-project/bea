@@ -31,6 +31,11 @@ fn parse_statements(
       }
     }
 
+    [lexer.Echo, ..rest] -> {
+      let #(expr, after_expr) = parse_expression(rest)
+      parse_statements(after_expr, [ast.Echo(expr), ..acc])
+    }
+
     [_, ..rest] -> parse_statements(rest, acc)
   }
 }
@@ -150,6 +155,11 @@ fn parse_block(
     [lexer.If, ..rest] -> {
       let #(if_stmt, after_if) = parse_if(rest)
       parse_block(after_if, [if_stmt, ..acc])
+    }
+
+    [lexer.Echo, ..rest] -> {
+      let #(expr, after_expr) = parse_expression(rest)
+      parse_block(after_expr, [ast.Echo(expr), ..acc])
     }
 
     // Catch-all: Standalone expression

@@ -166,6 +166,7 @@ fn generate_statement(stmt: ast.Statement) -> String {
         }
       }
     }
+    ast.Echo(expr) -> "echo " <> generate_expression(expr)
   }
 }
 
