@@ -67,6 +67,10 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       let #(right, after_right) = parse_expression(rest)
       #(ast.BinaryExpr(left, "-", right), after_right)
     }
+    [lexer.Greater, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, ">", right), after_right)
+    }
 
     // You can add Star (*) and Slash (/) here easily later!
     // 3. If no operator is found, just return the primary expression
