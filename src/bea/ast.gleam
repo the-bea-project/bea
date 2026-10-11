@@ -12,9 +12,13 @@ pub type Expr {
   ListExpr(elements: List(Expr))
 }
 
+pub type Clause {
+  Clause(params: List(Expr), body: List(Statement))
+}
+
 pub type Statement {
-  // A function definition needs a name, parameters, and a body
-  DefStmt(name: String, params: List(String), body: List(Statement))
+  // A function definition now contains a list of Clauses instead of just one body
+  DefStmt(name: String, clauses: List(Clause))
 
   // A return statement evaluates an expression
   ReturnStmt(Expr)

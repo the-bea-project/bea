@@ -1,8 +1,8 @@
 // src/bea/codegen.gleam
-
 import bea/ast
 import gleam/int
 import gleam/list
+import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 
@@ -47,7 +47,10 @@ fn collect_imports(
 // Checks specific AST nodes for features that require Gleam standard libraries
 fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
   case stmt {
-    ast.DefStmt(_, _, body) -> collect_imports(body, imports)
+    ast.DefStmt(_, clauses) ->
+      list.fold(clauses, imports, fn(acc, clause) {
+        collect_imports(clause.body, acc)
+      })
 
     ast.IfStmt(_, body, else_body) -> {
       let base_imports =
@@ -69,13 +72,31 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
 fn generate_statement(stmt: ast.Statement) -> String {
   case stmt {
     // 1. Map `def` to `pub fn`
-    ast.DefStmt(name, params, body) -> {
-      let params_str = string.join(params, ", ")
-      let body_str =
-        body
-        |> list.map(generate_statement)
-        |> string.join("\n  ")
-      "pub fn " <> name <> "(" <> params_str <> ") {\n  " <> body_str <> "\n}"
+    ast.DefStmt(name, clauses) -> {
+      case clauses {
+        // Single clause -> check if simple or pattern-based
+        [ast.Clause(params, body)] -> {
+          case is_simple_params(params) {
+            True -> {
+              let params_str =
+                params |> list.map(generate_pattern) |> string.join(", ")
+              let body_str =
+                body |> list.map(generate_statement) |> string.join("\n  ")
+              "pub fn "
+              <> name
+              <> "("
+              <> params_str
+              <> ") {\n  "
+              <> body_str
+              <> "\n}"
+            }
+            False -> generate_multi_clause(name, clauses)
+          }
+        }
+
+        // Multi-clause -> Gleam pattern match
+        _ -> generate_multi_clause(name, clauses)
+      }
     }
 
     // 2. Gleam doesn't use the `return` keyword, so we just output the expression
@@ -145,6 +166,90 @@ fn generate_statement(stmt: ast.Statement) -> String {
         }
       }
     }
+  }
+}
+
+fn generate_multi_clause(name: String, clauses: List(ast.Clause)) -> String {
+  let first_clause = list.first(clauses) |> result.unwrap(ast.Clause([], []))
+  let arity = list.length(first_clause.params)
+
+  let synthetic_params = make_synthetic_params(0, arity, [])
+  let params_def = string.join(synthetic_params, ", ")
+
+  // Single arg vs Multi-arg tuple matching
+  let match_target = case arity {
+    1 -> string.join(synthetic_params, "")
+    _ -> "#(" <> string.join(synthetic_params, ", ") <> ")"
+  }
+
+  let cases_str =
+    clauses
+    |> list.map(fn(c) { generate_clause_arm(c, arity) })
+    |> string.join("\n    ")
+
+  "pub fn "
+  <> name
+  <> "("
+  <> params_def
+  <> ") {\n  case "
+  <> match_target
+  <> " {\n    "
+  <> cases_str
+  <> "\n  }\n}"
+}
+
+// Recursive helper to build ["arg_0", "arg_1", ...] up to arity
+fn make_synthetic_params(
+  current: Int,
+  arity: Int,
+  acc: List(String),
+) -> List(String) {
+  case current >= arity {
+    True -> list.reverse(acc)
+    False ->
+      make_synthetic_params(current + 1, arity, [
+        "arg_" <> int.to_string(current),
+        ..acc
+      ])
+  }
+}
+
+// Helpers for multi-clause codegen
+fn is_simple_params(params: List(ast.Expr)) -> Bool {
+  list.all(params, fn(p) {
+    case p {
+      ast.IdentExpr(_) -> True
+      _ -> False
+    }
+  })
+}
+
+fn generate_clause_arm(clause: ast.Clause, arity: Int) -> String {
+  let ast.Clause(params, body) = clause
+
+  let pattern_str = case arity {
+    1 ->
+      case list.first(params) {
+        Ok(p) -> generate_pattern(p)
+        Error(_) -> ""
+      }
+    _ ->
+      "#("
+      <> { params |> list.map(generate_pattern) |> string.join(", ") }
+      <> ")"
+  }
+
+  let body_str = body |> list.map(generate_statement) |> string.join("\n      ")
+
+  pattern_str <> " -> {\n      " <> body_str <> "\n    }"
+}
+
+fn generate_pattern(expr: ast.Expr) -> String {
+  case expr {
+    ast.IntExpr(val) -> int.to_string(val)
+    ast.StringExpr(val) -> "\"" <> val <> "\""
+    ast.IdentExpr(name) -> name
+    _ -> panic as "Unsupported pattern expression"
   }
 }
 

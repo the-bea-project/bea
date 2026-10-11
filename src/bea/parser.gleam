@@ -14,19 +14,17 @@ fn parse_statements(
   acc: List(ast.Statement),
 ) -> List(ast.Statement) {
   case tokens {
-    [lexer.Eof] | [] -> acc
+    [lexer.Eof] | [] -> collapse_clauses(list.reverse(acc))
 
-    // Match up to the opening parenthesis
     [lexer.Def, lexer.Ident(name), lexer.LParen, ..rest] -> {
-      // 1. Dynamically parse the parameter list
-      let #(params, after_params) = parse_params(rest, [])
+      // 1. Parse parameters as pattern expressions
+      let #(params, after_params) = parse_pattern_params(rest, [])
 
-      // 2. Expect the opening brace `{`, then parse the block
       case after_params {
         [lexer.LBrace, ..after_brace] -> {
           let #(body, after_block) = parse_block(after_brace, [])
-
-          let def_stmt = ast.DefStmt(name: name, params: params, body: body)
+          let clause = ast.Clause(params: params, body: body)
+          let def_stmt = ast.DefStmt(name: name, clauses: [clause])
           parse_statements(after_block, [def_stmt, ..acc])
         }
         _ -> panic as "Syntax Error: Expected '{' after function parameters"
@@ -34,6 +32,40 @@ fn parse_statements(
     }
 
     [_, ..rest] -> parse_statements(rest, acc)
+  }
+}
+
+// Parses function parameters as full pattern expressions (e.g. 0, "admin", or x)
+fn parse_pattern_params(
+  tokens: List(Token),
+  acc: List(ast.Expr),
+) -> #(List(ast.Expr), List(Token)) {
+  case tokens {
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      let #(expr, after_expr) = parse_expression(tokens)
+      case after_expr {
+        [lexer.Comma, ..rest] -> parse_pattern_params(rest, [expr, ..acc])
+        [lexer.RParen, ..rest] -> #(list.reverse([expr, ..acc]), rest)
+        _ -> panic as "Syntax Error: Expected ',' or ')' in parameters"
+      }
+    }
+  }
+}
+
+// Helper to merge consecutive DefStmt definitions with identical names
+fn collapse_clauses(statements: List(ast.Statement)) -> List(ast.Statement) {
+  case statements {
+    [] -> []
+    [ast.DefStmt(name1, clauses1), ast.DefStmt(name2, clauses2), ..rest]
+      if name1 == name2
+    -> {
+      collapse_clauses([
+        ast.DefStmt(name1, list.append(clauses1, clauses2)),
+        ..rest
+      ])
+    }
+    [stmt, ..rest] -> [stmt, ..collapse_clauses(rest)]
   }
 }
 
@@ -93,28 +125,6 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     // You can add Star (*) and Slash (/) here easily later!
     // 3. If no operator is found, just return the primary expression
     _ -> #(left, after_left)
-  }
-}
-
-fn parse_params(
-  tokens: List(Token),
-  acc: List(String),
-) -> #(List(String), List(Token)) {
-  case tokens {
-    // 1. Base case: We hit the closing parenthesis
-    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
-
-    // 2. Found a parameter followed by a comma (e.g., `a,`)
-    [lexer.Ident(param), lexer.Comma, ..rest] ->
-      parse_params(rest, [param, ..acc])
-
-    // 3. Found the last parameter followed by the closing parenthesis (e.g., `a)`)
-    [lexer.Ident(param), lexer.RParen, ..rest] -> #(
-      list.reverse([param, ..acc]),
-      rest,
-    )
-
-    _ -> panic as "Syntax Error: Expected parameter name or ')'"
   }
 }
 

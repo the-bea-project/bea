@@ -1,4 +1,5 @@
 // test/parser_test.gleam
+// test/parser_test.gleam
 
 import bea/ast
 import bea/lexer
@@ -23,11 +24,16 @@ pub fn parser_basic_function_test() {
     ast.ExprStmt(
       ast.CallExpr("notify", [ast.IdentExpr("user_id"), ast.IdentExpr("status")]),
     ),
-    // The new BinaryExpr handling the `40 + 2`
     ast.ReturnStmt(ast.BinaryExpr(ast.IntExpr(40), "+", ast.IntExpr(2))),
   ]
-  let expected_def =
-    ast.DefStmt("process", ["user_id", "status"], expected_body)
+
+  let expected_clause =
+    ast.Clause(
+      [ast.IdentExpr("user_id"), ast.IdentExpr("status")],
+      expected_body,
+    )
+
+  let expected_def = ast.DefStmt("process", [expected_clause])
 
   tree
   |> should.equal(ast.Program([expected_def]))
@@ -52,7 +58,8 @@ pub fn parser_if_statement_test() {
   let else_body = [ast.ReturnStmt(ast.StringExpr("inactive"))]
   let expected_body = [ast.IfStmt(ast.IdentExpr("status"), if_body, else_body)]
 
-  let expected_def = ast.DefStmt("check_status", ["status"], expected_body)
+  let expected_clause = ast.Clause([ast.IdentExpr("status")], expected_body)
+  let expected_def = ast.DefStmt("check_status", [expected_clause])
 
   tree
   |> should.equal(ast.Program([expected_def]))

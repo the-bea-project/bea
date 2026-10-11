@@ -6,14 +6,12 @@ import gleeunit/should
 
 pub fn end_to_end_transpiler_test() {
   let source =
-    "
-    def process(user_id) {
-      status = \"active\"
-      if status {
-        return 40 + 2
-      }
-    }
-  "
+    "def process(user_id) {
+  status = \"active\"
+  if status {
+    return 40 + 2
+  }
+}"
 
   let output =
     source
@@ -21,26 +19,23 @@ pub fn end_to_end_transpiler_test() {
     |> parser.parse()
     |> codegen.generate()
 
-  // Now expects the bool.guard and auto-import
   let expected =
     "import gleam/bool
 
-    pub fn process(user_id) {
-      let status = \"active\"
-      use <- bool.guard(when: status, return: 40 + 2)
-    }"
+pub fn process(user_id) {
+  let status = \"active\"
+  use <- bool.guard(when: status, return: 40 + 2)
+}"
 
   output |> should.equal(expected)
 }
 
 pub fn list_transpiler_test() {
   let source =
-    "
-    def get_roles() {
-      roles = [\"admin\", \"user\", \"guest\"]
-      return roles
-    }
-  "
+    "def get_roles() {
+  roles = [\"admin\", \"user\", \"guest\"]
+  return roles
+}"
 
   let output =
     source
@@ -48,12 +43,11 @@ pub fn list_transpiler_test() {
     |> parser.parse()
     |> codegen.generate()
 
-  // UPDATED: Fixed the indentation spacing to match the codegen exactly
   let expected =
     "pub fn get_roles() {
-      let roles = [\"admin\", \"user\", \"guest\"]
-      roles
-    }"
+  let roles = [\"admin\", \"user\", \"guest\"]
+  roles
+}"
 
   output |> should.equal(expected)
 }
