@@ -1,0 +1,59 @@
+// test/parser_test.gleam
+
+import bea/ast
+import bea/lexer
+import bea/parser
+import gleeunit/should
+
+pub fn parser_basic_function_test() {
+  let source =
+    "
+    def process(user_id, status) {
+      status = \"active\"
+      notify(user_id, status)
+      return 40 + 2
+    }
+  "
+
+  let tokens = lexer.tokenize(source)
+  let tree = parser.parse(tokens)
+
+  let expected_body = [
+    ast.AssignStmt("status", ast.StringExpr("active")),
+    ast.ExprStmt(
+      ast.CallExpr("notify", [ast.IdentExpr("user_id"), ast.IdentExpr("status")]),
+    ),
+    // The new BinaryExpr handling the `40 + 2`
+    ast.ReturnStmt(ast.BinaryExpr(ast.IntExpr(40), "+", ast.IntExpr(2))),
+  ]
+  let expected_def =
+    ast.DefStmt("process", ["user_id", "status"], expected_body)
+
+  tree
+  |> should.equal(ast.Program([expected_def]))
+}
+
+pub fn parser_if_statement_test() {
+  let source =
+    "
+    def check_status(status) {
+      if status {
+        return \"active\"
+      } else {
+        return \"inactive\"
+      }
+    }
+  "
+
+  let tokens = lexer.tokenize(source)
+  let tree = parser.parse(tokens)
+
+  let if_body = [ast.ReturnStmt(ast.StringExpr("active"))]
+  let else_body = [ast.ReturnStmt(ast.StringExpr("inactive"))]
+  let expected_body = [ast.IfStmt(ast.IdentExpr("status"), if_body, else_body)]
+
+  let expected_def = ast.DefStmt("check_status", ["status"], expected_body)
+
+  tree
+  |> should.equal(ast.Program([expected_def]))
+}
