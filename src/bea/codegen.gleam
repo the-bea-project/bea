@@ -20,6 +20,12 @@ pub fn generate(program: ast.Program) -> String {
   // 2. Generate the main body code
   let body_str =
     statements
+    |> list.filter(fn(s) {
+      case s {
+        ast.ImportStmt(_) -> False
+        _ -> True
+      }
+    })
     |> list.map(generate_statement)
     |> string.join("\n\n")
 
@@ -47,7 +53,8 @@ fn collect_imports(
 // Checks specific AST nodes for features that require Gleam standard libraries
 fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
   case stmt {
-    ast.DefStmt(_, clauses) ->
+    // ADDED an extra '_' here so there are 4 arguments total
+    ast.DefStmt(_, _, _, clauses) ->
       list.fold(clauses, imports, fn(acc, clause) {
         collect_imports(clause.body, acc)
       })
@@ -65,16 +72,28 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
       }
     }
 
+    ast.ImportStmt(path) -> set.insert(imports, path)
+
     _ -> imports
   }
 }
 
 fn generate_statement(stmt: ast.Statement) -> String {
   case stmt {
-    // 1. Map `def` to `pub fn`
-    ast.DefStmt(name, clauses) -> {
+    // ADDED return_type here
+    ast.DefStmt(is_pub, name, return_type, clauses) -> {
+      let pub_prefix = case is_pub {
+        True -> "pub "
+        False -> ""
+      }
+
+      // Build the return string
+      let ret_str = case return_type {
+        "" -> ""
+        t -> " -> " <> t
+      }
+
       case clauses {
-        // Single clause -> check if simple or pattern-based
         [ast.Clause(params, body)] -> {
           case is_simple_params(params) {
             True -> {
@@ -82,20 +101,24 @@ fn generate_statement(stmt: ast.Statement) -> String {
                 params |> list.map(generate_pattern) |> string.join(", ")
               let body_str =
                 body |> list.map(generate_statement) |> string.join("\n  ")
-              "pub fn "
+              pub_prefix
+              <> "fn "
               <> name
               <> "("
               <> params_str
-              <> ") {\n  "
+              <> ")"
+              <> ret_str
+              // INJECTED HERE
+              <> " {\n  "
               <> body_str
               <> "\n}"
             }
-            False -> generate_multi_clause(name, clauses)
+            // PASSED return_type
+            False -> generate_multi_clause(is_pub, name, return_type, clauses)
           }
         }
-
-        // Multi-clause -> Gleam pattern match
-        _ -> generate_multi_clause(name, clauses)
+        // PASSED return_type
+        _ -> generate_multi_clause(is_pub, name, return_type, clauses)
       }
     }
 
@@ -166,18 +189,37 @@ fn generate_statement(stmt: ast.Statement) -> String {
         }
       }
     }
+
+    ast.ImportStmt(_) -> ""
+
     ast.Echo(expr) -> "echo " <> generate_expression(expr)
   }
 }
 
-fn generate_multi_clause(name: String, clauses: List(ast.Clause)) -> String {
+fn generate_multi_clause(
+  is_pub: Bool,
+  name: String,
+  return_type: String,
+  // ADDED HERE
+  clauses: List(ast.Clause),
+) -> String {
+  let pub_prefix = case is_pub {
+    True -> "pub "
+    False -> ""
+  }
+
+  // Build the return string
+  let ret_str = case return_type {
+    "" -> ""
+    t -> " -> " <> t
+  }
+
   let first_clause = list.first(clauses) |> result.unwrap(ast.Clause([], []))
   let arity = list.length(first_clause.params)
 
   let synthetic_params = make_synthetic_params(0, arity, [])
   let params_def = string.join(synthetic_params, ", ")
 
-  // Single arg vs Multi-arg tuple matching
   let match_target = case arity {
     1 -> string.join(synthetic_params, "")
     _ -> "#(" <> string.join(synthetic_params, ", ") <> ")"
@@ -188,31 +230,19 @@ fn generate_multi_clause(name: String, clauses: List(ast.Clause)) -> String {
     |> list.map(fn(c) { generate_clause_arm(c, arity) })
     |> string.join("\n    ")
 
-  "pub fn "
+  pub_prefix
+  <> "fn "
   <> name
   <> "("
   <> params_def
-  <> ") {\n  case "
+  <> ")"
+  <> ret_str
+  // INJECTED HERE
+  <> " {\n  case "
   <> match_target
   <> " {\n    "
   <> cases_str
   <> "\n  }\n}"
-}
-
-// Recursive helper to build ["arg_0", "arg_1", ...] up to arity
-fn make_synthetic_params(
-  current: Int,
-  arity: Int,
-  acc: List(String),
-) -> List(String) {
-  case current >= arity {
-    True -> list.reverse(acc)
-    False ->
-      make_synthetic_params(current + 1, arity, [
-        "arg_" <> int.to_string(current),
-        ..acc
-      ])
-  }
 }
 
 // Helpers for multi-clause codegen
@@ -220,6 +250,7 @@ fn is_simple_params(params: List(ast.Expr)) -> Bool {
   list.all(params, fn(p) {
     case p {
       ast.IdentExpr(_) -> True
+      ast.TypedExpr(ast.IdentExpr(_), _) -> True
       _ -> False
     }
   })
@@ -250,6 +281,8 @@ fn generate_pattern(expr: ast.Expr) -> String {
     ast.IntExpr(val) -> int.to_string(val)
     ast.StringExpr(val) -> "\"" <> val <> "\""
     ast.IdentExpr(name) -> name
+    ast.TypedExpr(inner, type_name) ->
+      generate_pattern(inner) <> ": " <> type_name
     _ -> panic as "Unsupported pattern expression"
   }
 }
@@ -260,12 +293,24 @@ fn generate_expression(expr: ast.Expr) -> String {
     ast.StringExpr(val) -> "\"" <> val <> "\""
     ast.IdentExpr(name) -> name
 
-    ast.BinaryExpr(left, op, right) ->
+    ast.UnaryExpr("not", inner) -> "!" <> generate_expression(inner)
+    ast.UnaryExpr(op, _) -> panic as { "Unsupported unary operator: " <> op }
+
+    ast.TypedExpr(inner, type_name) ->
+      generate_expression(inner) <> ": " <> type_name
+
+    ast.BinaryExpr(left, op, right) -> {
+      let gleam_op = case op {
+        "and" -> "&&"
+        "or" -> "||"
+        other -> other
+      }
       generate_expression(left)
       <> " "
-      <> op
+      <> gleam_op
       <> " "
       <> generate_expression(right)
+    }
 
     ast.CallExpr(name, args) -> {
       let args_str = args |> list.map(generate_expression) |> string.join(", ")
@@ -278,5 +323,21 @@ fn generate_expression(expr: ast.Expr) -> String {
         elements |> list.map(generate_expression) |> string.join(", ")
       "[" <> elements_str <> "]"
     }
+  }
+}
+
+// Recursive helper to build ["arg_0", "arg_1", ...] up to arity
+fn make_synthetic_params(
+  current: Int,
+  arity: Int,
+  acc: List(String),
+) -> List(String) {
+  case current >= arity {
+    True -> list.reverse(acc)
+    False ->
+      make_synthetic_params(current + 1, arity, [
+        "arg_" <> int.to_string(current),
+        ..acc
+      ])
   }
 }

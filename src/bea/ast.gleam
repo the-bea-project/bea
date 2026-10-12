@@ -10,6 +10,9 @@ pub type Expr {
   BinaryExpr(left: Expr, op: String, right: Expr)
   // A list of expressions, e.g., [1, 2, 3]
   ListExpr(elements: List(Expr))
+  // Typed expression, e.g. param: Int
+  TypedExpr(expr: Expr, type_name: String)
+  UnaryExpr(op: String, expr: Expr)
 }
 
 pub type Clause {
@@ -18,7 +21,12 @@ pub type Clause {
 
 pub type Statement {
   // A function definition now contains a list of Clauses instead of just one body
-  DefStmt(name: String, clauses: List(Clause))
+  DefStmt(
+    is_pub: Bool,
+    name: String,
+    return_type: String,
+    clauses: List(Clause),
+  )
 
   // A return statement evaluates an expression
   ReturnStmt(Expr)
@@ -34,6 +42,9 @@ pub type Statement {
 
   // Echo
   Echo(expr: Expr)
+
+  // Import
+  ImportStmt(path: String)
 }
 
 // A full Bea program is just a list of top-level statements

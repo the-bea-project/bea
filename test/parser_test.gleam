@@ -1,5 +1,4 @@
 // test/parser_test.gleam
-// test/parser_test.gleam
 
 import bea/ast
 import bea/lexer
@@ -33,7 +32,8 @@ pub fn parser_basic_function_test() {
       expected_body,
     )
 
-  let expected_def = ast.DefStmt("process", [expected_clause])
+  // ADDED the "" for the return_type parameter
+  let expected_def = ast.DefStmt(False, "process", "", [expected_clause])
 
   tree
   |> should.equal(ast.Program([expected_def]))
@@ -59,7 +59,9 @@ pub fn parser_if_statement_test() {
   let expected_body = [ast.IfStmt(ast.IdentExpr("status"), if_body, else_body)]
 
   let expected_clause = ast.Clause([ast.IdentExpr("status")], expected_body)
-  let expected_def = ast.DefStmt("check_status", [expected_clause])
+
+  // ADDED the "" for the return_type parameter
+  let expected_def = ast.DefStmt(False, "check_status", "", [expected_clause])
 
   tree
   |> should.equal(ast.Program([expected_def]))

@@ -1,6 +1,7 @@
 // src/bea.gleam
 
 import argv
+import bea/ast
 import bea/codegen
 import bea/lexer
 import bea/parser
@@ -11,6 +12,12 @@ import gleam/set.{type Set}
 import gleam/string
 import shellout
 import simplifile
+
+pub type LocalImport {
+  BeaFile(String)
+  GleamFile(String)
+  ExternalPackage
+}
 
 pub fn main() {
   case argv.load().arguments {
@@ -48,6 +55,8 @@ pub fn main() {
 fn setup_project(target: String) -> String {
   let build_dir = ".beabuild"
   let src_dir = build_dir <> "/src"
+  let _ = simplifile.delete(src_dir)
+
   let assert Ok(_) = simplifile.create_directory_all(src_dir)
 
   let toml =
@@ -101,50 +110,106 @@ fn crawl_and_transpile(
         False -> {
           let new_visited = set.insert(visited, module)
 
-          // Look for the file in the base directory instead of hardcoded "src/"
-          let filepath = base_dir <> "/" <> module <> ".bea"
+          case resolve_import(module, base_dir) {
+            // 1. Local .bea file -> Transpile to Gleam
+            BeaFile(_) -> {
+              let filepath = base_dir <> "/" <> module <> ".bea"
 
-          let source = case simplifile.read(filepath) {
-            Ok(s) -> s
-            Error(_) -> panic as { "Could not find module: " <> filepath }
+              let source = case simplifile.read(filepath) {
+                Ok(s) -> s
+                Error(_) -> panic as { "Could not find module: " <> filepath }
+              }
+
+              let parsed_ast =
+                source
+                |> lexer.tokenize()
+                |> parser.parse()
+
+              // Filter imports to queue local (.bea or .gleam) dependencies
+              let local_imports =
+                parsed_ast
+                |> extract_imports_from_ast()
+                |> list.filter(fn(imp) {
+                  case resolve_import(imp, base_dir) {
+                    BeaFile(_) | GleamFile(_) -> True
+                    ExternalPackage -> False
+                  }
+                })
+
+              let new_queue = list.append(rest, local_imports)
+
+              let gleam_code = codegen.generate(parsed_ast)
+
+              let out_path = out_dir <> "/" <> module <> ".gleam"
+              let out_folder =
+                string.split(out_path, "/")
+                |> list.reverse()
+                |> list.drop(1)
+                |> list.reverse()
+                |> string.join("/")
+
+              let assert Ok(_) = simplifile.create_directory_all(out_folder)
+              let assert Ok(_) = simplifile.write(out_path, gleam_code)
+
+              crawl_and_transpile(new_queue, new_visited, out_dir, base_dir)
+            }
+
+            // 2. Local .gleam file -> Copy straight over
+            GleamFile(_) -> {
+              let src_path = base_dir <> "/" <> module <> ".gleam"
+              let out_path = out_dir <> "/" <> module <> ".gleam"
+              let out_folder =
+                string.split(out_path, "/")
+                |> list.reverse()
+                |> list.drop(1)
+                |> list.reverse()
+                |> string.join("/")
+
+              let assert Ok(_) = simplifile.create_directory_all(out_folder)
+              let assert Ok(_) = simplifile.copy_file(src_path, out_path)
+
+              crawl_and_transpile(rest, new_visited, out_dir, base_dir)
+            }
+
+            // 3. Stdlib or Hex Package -> Skip file crawling
+            ExternalPackage -> {
+              crawl_and_transpile(rest, new_visited, out_dir, base_dir)
+            }
           }
-
-          let new_imports = extract_imports(source)
-          let new_queue = list.append(rest, new_imports)
-
-          let gleam_code =
-            source
-            |> lexer.tokenize()
-            |> parser.parse()
-            |> codegen.generate()
-
-          let out_path = out_dir <> "/" <> module <> ".gleam"
-          let out_folder =
-            string.split(out_path, "/")
-            |> list.reverse()
-            |> list.drop(1)
-            |> list.reverse()
-            |> string.join("/")
-
-          let assert Ok(_) = simplifile.create_directory_all(out_folder)
-          let assert Ok(_) = simplifile.write(out_path, gleam_code)
-
-          crawl_and_transpile(new_queue, new_visited, out_dir, base_dir)
         }
       }
     }
   }
 }
 
-// Scans text directly for "import my_module"
-fn extract_imports(source: String) -> List(String) {
-  source
-  |> string.split("\n")
-  |> list.map(string.trim)
-  |> list.filter(string.starts_with(_, "import "))
-  |> list.map(fn(line) {
-    line
-    |> string.replace("import ", "")
-    |> string.trim()
+// Extracts import paths directly from the parsed AST
+fn extract_imports_from_ast(program: ast.Program) -> List(String) {
+  let ast.Program(statements) = program
+  list.filter_map(statements, fn(stmt) {
+    case stmt {
+      ast.ImportStmt(path) -> Ok(path)
+      _ -> Error(Nil)
+    }
   })
+}
+
+// Determines whether an import path maps to a local `.bea`, `.gleam`, or external package
+fn resolve_import(import_path: String, base_dir: String) -> LocalImport {
+  case string.starts_with(import_path, "gleam/") {
+    True -> ExternalPackage
+    False -> {
+      let bea_path = base_dir <> "/" <> import_path <> ".bea"
+      let gleam_path = base_dir <> "/" <> import_path <> ".gleam"
+
+      case simplifile.is_file(bea_path) {
+        Ok(True) -> BeaFile(import_path)
+        _ -> {
+          case simplifile.is_file(gleam_path) {
+            Ok(True) -> GleamFile(import_path)
+            _ -> ExternalPackage
+          }
+        }
+      }
+    }
+  }
 }

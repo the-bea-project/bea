@@ -1,4 +1,5 @@
 // src/bea/parser.gleam
+// src/bea/parser.gleam
 
 import bea/ast
 import bea/lexer.{type Token}
@@ -16,24 +17,25 @@ fn parse_statements(
   case tokens {
     [lexer.Eof] | [] -> collapse_clauses(list.reverse(acc))
 
-    [lexer.Def, lexer.Ident(name), lexer.LParen, ..rest] -> {
-      // 1. Parse parameters as pattern expressions
-      let #(params, after_params) = parse_pattern_params(rest, [])
-
-      case after_params {
-        [lexer.LBrace, ..after_brace] -> {
-          let #(body, after_block) = parse_block(after_brace, [])
-          let clause = ast.Clause(params: params, body: body)
-          let def_stmt = ast.DefStmt(name: name, clauses: [clause])
-          parse_statements(after_block, [def_stmt, ..acc])
-        }
-        _ -> panic as "Syntax Error: Expected '{' after function parameters"
-      }
+    // Handle `pub def`
+    [lexer.Pub, lexer.Def, lexer.Ident(name), lexer.LParen, ..rest] -> {
+      parse_def(True, name, rest, acc)
     }
 
+    // Handle private `def`
+    [lexer.Def, lexer.Ident(name), lexer.LParen, ..rest] -> {
+      parse_def(False, name, rest, acc)
+    }
+
+    // (The old duplicate block was safely removed from here!)
     [lexer.Echo, ..rest] -> {
       let #(expr, after_expr) = parse_expression(rest)
       parse_statements(after_expr, [ast.Echo(expr), ..acc])
+    }
+
+    [lexer.Import, ..rest] -> {
+      let #(path, after_path) = parse_import_path(rest, "")
+      parse_statements(after_path, [ast.ImportStmt(path), ..acc])
     }
 
     [_, ..rest] -> parse_statements(rest, acc)
@@ -48,10 +50,23 @@ fn parse_pattern_params(
   case tokens {
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
     _ -> {
+      // 1. Parse the parameter name
       let #(expr, after_expr) = parse_expression(tokens)
-      case after_expr {
-        [lexer.Comma, ..rest] -> parse_pattern_params(rest, [expr, ..acc])
-        [lexer.RParen, ..rest] -> #(list.reverse([expr, ..acc]), rest)
+
+      // 2. Intercept type annotations (e.g., `: Int`)
+      let #(final_expr, after_type) = case after_expr {
+        [lexer.Colon, lexer.TypeIdent(type_name), ..rest2] -> #(
+          ast.TypedExpr(expr, type_name),
+          rest2,
+        )
+        _ -> #(expr, after_expr)
+      }
+
+      // 3. Look for the comma or closing parenthesis
+      case after_type {
+        [lexer.Comma, ..rest3] ->
+          parse_pattern_params(rest3, [final_expr, ..acc])
+        [lexer.RParen, ..rest3] -> #(list.reverse([final_expr, ..acc]), rest3)
         _ -> panic as "Syntax Error: Expected ',' or ')' in parameters"
       }
     }
@@ -62,11 +77,16 @@ fn parse_pattern_params(
 fn collapse_clauses(statements: List(ast.Statement)) -> List(ast.Statement) {
   case statements {
     [] -> []
-    [ast.DefStmt(name1, clauses1), ast.DefStmt(name2, clauses2), ..rest]
+    // Match all 4 arguments for both DefStmts
+    [
+      ast.DefStmt(p1, name1, ret1, clauses1),
+      ast.DefStmt(_p2, name2, _ret2, clauses2),
+      ..rest
+    ]
       if name1 == name2
     -> {
       collapse_clauses([
-        ast.DefStmt(name1, list.append(clauses1, clauses2)),
+        ast.DefStmt(p1, name1, ret1, list.append(clauses1, clauses2)),
         ..rest
       ])
     }
@@ -79,7 +99,19 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     [lexer.IntLit(val), ..rest] -> #(ast.IntExpr(val), rest)
     [lexer.StringLit(val), ..rest] -> #(ast.StringExpr(val), rest)
 
+    [lexer.Not, ..rest] -> {
+      let #(inner_expr, after_inner) = parse_primary(rest)
+      #(ast.UnaryExpr("not", inner_expr), after_inner)
+    }
+
+    // Standard function calls (e.g., calculate(10))
     [lexer.Ident(name), lexer.LParen, ..rest] -> {
+      let #(args, after_args) = parse_args(rest, [])
+      #(ast.CallExpr(name, args), after_args)
+    }
+
+    // Constructor calls (e.g., Ok(42) or User("Alice"))
+    [lexer.TypeIdent(name), lexer.LParen, ..rest] -> {
       let #(args, after_args) = parse_args(rest, [])
       #(ast.CallExpr(name, args), after_args)
     }
@@ -90,17 +122,26 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       #(ast.ListExpr(elements), after_elements)
     }
 
+    // For module calls like `io.println()`
+    [lexer.Ident(module), lexer.Dot, lexer.Ident(name), lexer.LParen, ..rest] -> {
+      let #(args, after_args) = parse_args(rest, [])
+      // Combine them into a single CallExpr string for the backend
+      #(ast.CallExpr(module <> "." <> name, args), after_args)
+    }
+
+    // Standalone variables
     [lexer.Ident(name), ..rest] -> #(ast.IdentExpr(name), rest)
+
+    // Standalone constructors (e.g., True, False)
+    [lexer.TypeIdent(name), ..rest] -> #(ast.IdentExpr(name), rest)
 
     _ -> panic as "Syntax Error: Expected an expression"
   }
 }
 
 fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
-  // 1. Always parse the left side first (a number, variable, etc.)
   let #(left, after_left) = parse_primary(tokens)
 
-  // 2. Check if an operator immediately follows it
   case after_left {
     [lexer.Plus, ..rest] -> {
       let #(right, after_right) = parse_expression(rest)
@@ -109,6 +150,14 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     [lexer.Minus, ..rest] -> {
       let #(right, after_right) = parse_expression(rest)
       #(ast.BinaryExpr(left, "-", right), after_right)
+    }
+    [lexer.Star, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "*", right), after_right)
+    }
+    [lexer.Slash, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "/", right), after_right)
     }
     [lexer.Greater, ..rest] -> {
       let #(right, after_right) = parse_expression(rest)
@@ -126,9 +175,15 @@ fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       let #(right, after_right) = parse_expression(rest)
       #(ast.BinaryExpr(left, "<>", right), after_right)
     }
+    [lexer.And, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "and", right), after_right)
+    }
+    [lexer.Or, ..rest] -> {
+      let #(right, after_right) = parse_expression(rest)
+      #(ast.BinaryExpr(left, "or", right), after_right)
+    }
 
-    // You can add Star (*) and Slash (/) here easily later!
-    // 3. If no operator is found, just return the primary expression
     _ -> #(left, after_left)
   }
 }
@@ -239,5 +294,48 @@ fn parse_if(tokens: List(Token)) -> #(ast.Statement, List(Token)) {
 
     // No else block
     _ -> #(ast.IfStmt(condition, body, []), after_body)
+  }
+}
+
+fn parse_import_path(
+  tokens: List(Token),
+  acc: String,
+) -> #(String, List(Token)) {
+  case tokens {
+    [lexer.Ident(name), ..rest] -> parse_import_path(rest, acc <> name)
+    [lexer.Slash, ..rest] -> parse_import_path(rest, acc <> "/")
+    _ -> #(acc, tokens)
+  }
+}
+
+fn parse_def(
+  is_pub: Bool,
+  name: String,
+  rest: List(Token),
+  acc: List(ast.Statement),
+) -> List(ast.Statement) {
+  let #(params, after_params) = parse_pattern_params(rest, [])
+
+  let #(return_type, after_ret) = case after_params {
+    [lexer.Arrow, lexer.TypeIdent(t), ..rest2] -> #(t, rest2)
+    _ -> #("", after_params)
+  }
+
+  case after_ret {
+    [lexer.LBrace, ..after_brace] -> {
+      let #(body, after_block) = parse_block(after_brace, [])
+      let clause = ast.Clause(params: params, body: body)
+      // Pass the return_type here
+      let def_stmt =
+        ast.DefStmt(
+          is_pub: is_pub,
+          name: name,
+          return_type: return_type,
+          clauses: [clause],
+        )
+      parse_statements(after_block, [def_stmt, ..acc])
+    }
+    _ ->
+      panic as "Syntax Error: Expected '{' after function parameters or return type"
   }
 }

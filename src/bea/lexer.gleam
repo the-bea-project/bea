@@ -14,6 +14,11 @@ pub type Token {
   Type
   Const
 
+  // --- Bool Ops ---
+  And
+  Or
+  Not
+
   // --- Control Flow ---
   If
   Else
@@ -51,6 +56,8 @@ pub type Token {
   Ampersand
   Underscore
   Comma
+  Dot
+  Arrow
   EqEq
   BangEq
   Concat
@@ -91,9 +98,13 @@ fn scan(chars: List(String), tokens: List(Token)) {
   case chars {
     // Base case: End of file. Prepend Eof and reverse the list.
     [] -> list.reverse([Eof, ..tokens])
-    //Whitespace: Ignore and keep scanning
+    // Whitespace: Ignore and keep scanning
     [" ", ..rest] | ["\n", ..rest] | ["\t", ..rest] | ["\r", ..rest] ->
       scan(rest, tokens)
+
+    // Arrow
+    ["-", ">", ..rest] -> scan(rest, [Arrow, ..tokens])
+
     // Single-character symbols
     ["+", ..rest] -> scan(rest, [Plus, ..tokens])
     ["-", ..rest] -> scan(rest, [Minus, ..tokens])
@@ -125,6 +136,7 @@ fn scan(chars: List(String), tokens: List(Token)) {
     ["&", ..rest] -> scan(rest, [Ampersand, ..tokens])
     ["_", ..rest] -> scan(rest, [Underscore, ..tokens])
     [",", ..rest] -> scan(rest, [Comma, ..tokens])
+    [".", ..rest] -> scan(rest, [Dot, ..tokens])
     ["[", ..rest] -> scan(rest, [LBracket, ..tokens])
     ["]", ..rest] -> scan(rest, [RBracket, ..tokens])
 
@@ -248,6 +260,9 @@ fn match_keyword(word: String) -> Token {
     "else" -> Else
     "cond" -> Cond
     "case" -> Case
+    "and" -> And
+    "or" -> Or
+    "not" -> Not
     "return" -> Return
     "loop" -> Loop
     "break" -> Break
