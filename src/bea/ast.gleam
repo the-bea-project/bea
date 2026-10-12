@@ -16,10 +16,22 @@ pub type Expr {
   UnaryExpr(op: String, expr: Expr)
   // For piping to `echo`
   EchoExpr(Expr)
+  CondExpr(clauses: List(CondClause))
+  CaseExpr(subject: Expr, clauses: List(CaseClause))
 }
 
 pub type Clause {
   Clause(params: List(Expr), body: List(Statement))
+}
+
+pub type CondClause {
+  CondClause(condition: Expr, body: Expr)
+}
+
+pub type CaseClause {
+  // patterns: a list of expressions (e.g., [41, 43] for `41 | 43`)
+  // guard: an empty list if no guard, or a 1-item list if there is an `if`
+  CaseClause(patterns: List(Expr), guard: List(Expr), body: Expr)
 }
 
 pub type Statement {

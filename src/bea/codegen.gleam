@@ -325,6 +325,15 @@ fn generate_expression(expr: ast.Expr) -> String {
         elements |> list.map(generate_expression) |> string.join(", ")
       "[" <> elements_str <> "]"
     }
+
+    ast.CondExpr(clauses) -> generate_cond(clauses)
+
+    ast.CaseExpr(subject, clauses) -> {
+      let sub_str = generate_expression(subject)
+      let clauses_str =
+        clauses |> list.map(generate_case_clause) |> string.join("\n    ")
+      "case " <> sub_str <> " {\n    " <> clauses_str <> "\n  }"
+    }
   }
 }
 
@@ -342,4 +351,42 @@ fn make_synthetic_params(
         ..acc
       ])
   }
+}
+
+fn generate_cond(clauses: List(ast.CondClause)) -> String {
+  case clauses {
+    [] -> "panic as \"No cond clause matched\""
+    [ast.CondClause(cond_expr, body_expr), ..rest] -> {
+      // If they use `True ->`, just output the body natively!
+      case cond_expr {
+        ast.IdentExpr("True") -> generate_expression(body_expr)
+        _ -> {
+          let c = generate_expression(cond_expr)
+          let b = generate_expression(body_expr)
+          let r = generate_cond(rest)
+          "case "
+          <> c
+          <> " {\n  True -> "
+          <> b
+          <> "\n  False -> {\n    "
+          <> r
+          <> "\n  }\n}"
+        }
+      }
+    }
+  }
+}
+
+fn generate_case_clause(clause: ast.CaseClause) -> String {
+  let pat_str =
+    clause.patterns |> list.map(generate_expression) |> string.join(" | ")
+
+  let guard_str = case clause.guard {
+    [] -> ""
+    [g] -> " if " <> generate_expression(g)
+    _ -> ""
+  }
+
+  let body_str = generate_expression(clause.body)
+  pat_str <> guard_str <> " -> " <> body_str
 }

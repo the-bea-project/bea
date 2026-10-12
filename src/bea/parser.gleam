@@ -130,6 +130,23 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       #(ast.CallExpr(module <> "." <> name, args), after_args)
     }
 
+    // Catch the wildcard underscore
+    [lexer.Underscore, ..rest] -> #(ast.IdentExpr("_"), rest)
+
+    // Parse cond { ... }
+    [lexer.Cond, lexer.LBrace, ..rest] -> {
+      let #(clauses, after_cond) = parse_cond_clauses(rest, [])
+      #(ast.CondExpr(clauses), after_cond)
+    }
+
+    // Parse case subject { ... }
+    [lexer.Case, ..rest] -> {
+      let #(subject, after_sub) = parse_expression(rest)
+      let assert [lexer.LBrace, ..after_brace] = after_sub
+      let #(clauses, after_case) = parse_case_clauses(after_brace, [])
+      #(ast.CaseExpr(subject, clauses), after_case)
+    }
+
     // Standalone variables
     [lexer.Ident(name), ..rest] -> #(ast.IdentExpr(name), rest)
 
@@ -369,5 +386,63 @@ fn parse_def(
     }
     _ ->
       panic as "Syntax Error: Expected '{' after function parameters or return type"
+  }
+}
+
+fn parse_cond_clauses(
+  tokens: List(Token),
+  acc: List(ast.CondClause),
+) -> #(List(ast.CondClause), List(Token)) {
+  case tokens {
+    [lexer.RBrace, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      let #(cond_expr, after_cond) = parse_expression(tokens)
+      let assert [lexer.Arrow, ..after_arrow] = after_cond
+      let #(body_expr, after_body) = parse_expression(after_arrow)
+      parse_cond_clauses(after_body, [
+        ast.CondClause(cond_expr, body_expr),
+        ..acc
+      ])
+    }
+  }
+}
+
+fn parse_case_clauses(
+  tokens: List(Token),
+  acc: List(ast.CaseClause),
+) -> #(List(ast.CaseClause), List(Token)) {
+  case tokens {
+    [lexer.RBrace, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      let #(patterns, after_patterns) = parse_patterns(tokens, [])
+
+      // Look for the `if` guard
+      let #(guard, after_guard) = case after_patterns {
+        [lexer.If, ..rest_guard] -> {
+          let #(g, after_g) = parse_expression(rest_guard)
+          #([g], after_g)
+        }
+        _ -> #([], after_patterns)
+      }
+
+      let assert [lexer.Arrow, ..after_arrow] = after_guard
+      let #(body, after_body) = parse_expression(after_arrow)
+      parse_case_clauses(after_body, [
+        ast.CaseClause(patterns, guard, body),
+        ..acc
+      ])
+    }
+  }
+}
+
+// Parses patterns separated by `|`
+fn parse_patterns(
+  tokens: List(Token),
+  acc: List(ast.Expr),
+) -> #(List(ast.Expr), List(Token)) {
+  let #(pat, after_pat) = parse_expression(tokens)
+  case after_pat {
+    [lexer.Pipe, ..rest] -> parse_patterns(rest, [pat, ..acc])
+    _ -> #(list.reverse([pat, ..acc]), after_pat)
   }
 }
