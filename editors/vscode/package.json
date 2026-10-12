@@ -3,6 +3,7 @@
   "displayName": "Bea Language Support",
   "description": "Syntax highlighting and language support for Bea",
   "version": "0.0.1",
+  "icon": "./icons/beatrix.png",
   "publisher": "bea-lang",
   "engines": {
     "vscode": "^1.75.0"
@@ -16,7 +17,12 @@
         "id": "bea",
         "aliases": ["Bea", "bea"],
         "extensions": [".bea"],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+
+        "icon": {
+          "light": "./icons/beatrix.svg",
+          "dark": "./icons/beatrix.svg"
+        }
       }
     ],
     "grammars": [
