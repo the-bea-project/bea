@@ -2,6 +2,7 @@
 
 pub type Expr {
   IntExpr(Int)
+  FloatExpr(Float)
   StringExpr(String)
   IdentExpr(String)
   // Function calls
@@ -13,6 +14,8 @@ pub type Expr {
   // Typed expression, e.g. param: Int
   TypedExpr(expr: Expr, type_name: String)
   UnaryExpr(op: String, expr: Expr)
+  // For piping to `echo`
+  EchoExpr(Expr)
 }
 
 pub type Clause {
@@ -39,9 +42,6 @@ pub type Statement {
 
   // If control flow
   IfStmt(condition: Expr, body: List(Statement), else_body: List(Statement))
-
-  // Echo
-  Echo(expr: Expr)
 
   // Import
   ImportStmt(path: String)

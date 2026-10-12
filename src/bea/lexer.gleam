@@ -1,3 +1,4 @@
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/string
@@ -47,6 +48,10 @@ pub type Token {
   Star
   Slash
   Percent
+  PlusDot
+  MinusDot
+  StarDot
+  SlashDot
   PipeRight
   Caret
   Question
@@ -75,6 +80,7 @@ pub type Token {
   CharLit(String)
   RawStringLit(String)
   IntLit(Int)
+  FloatLit(Float)
   Ident(String)
   // e.g., variable_name, function_name
   TypeIdent(String)
@@ -105,21 +111,25 @@ fn scan(chars: List(String), tokens: List(Token)) {
     // Arrow
     ["-", ">", ..rest] -> scan(rest, [Arrow, ..tokens])
 
-    // Single-character symbols
-    ["+", ..rest] -> scan(rest, [Plus, ..tokens])
-    ["-", ..rest] -> scan(rest, [Minus, ..tokens])
-    ["(", ..rest] -> scan(rest, [LParen, ..tokens])
-    [")", ..rest] -> scan(rest, [RParen, ..tokens])
-    ["{", ..rest] -> scan(rest, [LBrace, ..tokens])
-    ["}", ..rest] -> scan(rest, [RBrace, ..tokens])
-
     // Two-character operators
     ["<", ">", ..rest] -> scan(rest, [Concat, ..tokens])
     ["|", ">", ..rest] -> scan(rest, [PipeRight, ..tokens])
     ["!", "=", ..rest] -> scan(rest, [BangEq, ..tokens])
     ["=", "=", ..rest] -> scan(rest, [EqEq, ..tokens])
 
+    ["+", ".", ..rest] -> scan(rest, [PlusDot, ..tokens])
+    ["-", ".", ..rest] -> scan(rest, [MinusDot, ..tokens])
+    ["*", ".", ..rest] -> scan(rest, [StarDot, ..tokens])
+    ["/", ".", ..rest] -> scan(rest, [SlashDot, ..tokens])
+
+    // Single-character symbols
+    ["(", ..rest] -> scan(rest, [LParen, ..tokens])
+    [")", ..rest] -> scan(rest, [RParen, ..tokens])
+    ["{", ..rest] -> scan(rest, [LBrace, ..tokens])
+    ["}", ..rest] -> scan(rest, [RBrace, ..tokens])
     // Lower precendence single-character symbols
+    ["+", ..rest] -> scan(rest, [Plus, ..tokens])
+    ["-", ..rest] -> scan(rest, [Minus, ..tokens])
     ["!", ..rest] -> scan(rest, [Bang, ..tokens])
     ["=", ..rest] -> scan(rest, [Eq, ..tokens])
     ["<", ..rest] -> scan(rest, [Less, ..tokens])
@@ -150,7 +160,8 @@ fn scan(chars: List(String), tokens: List(Token)) {
         True -> consume_ident(rest, char, tokens)
         False -> {
           case is_digit(char) {
-            True -> consume_number(rest, char, tokens)
+            // PASS `False` HERE (meaning: no dot seen yet)
+            True -> consume_number(rest, char, False, tokens)
             False -> {
               // Unrecognized character (skip it for now)
               scan(rest, tokens)
@@ -297,23 +308,51 @@ fn is_alphanum(char: String) -> Bool {
 fn consume_number(
   chars: List(String),
   acc: String,
+  has_dot: Bool,
   tokens: List(Token),
 ) -> List(Token) {
   case chars {
     [char, ..rest] -> {
       case is_digit(char) {
-        True -> consume_number(rest, acc <> char, tokens)
+        // Still a digit, keep consuming
+        True -> consume_number(rest, acc <> char, has_dot, tokens)
+
+        // Not a digit. Is it the first dot we've seen?
         False -> {
-          // Parse the accumulated string into an Int
-          let assert Ok(val) = int.parse(acc)
-          // Pass `chars` (not `rest`) to scan so it processes the non-digit character next
-          scan(chars, [IntLit(val), ..tokens])
+          case char == "." && !has_dot {
+            // It's a dot! Keep consuming, but flip has_dot to True
+            True -> consume_number(rest, acc <> char, True, tokens)
+
+            // It's not a dot (or it's a second dot). We are done.
+            False -> {
+              case has_dot {
+                True -> {
+                  let assert Ok(val) = float.parse(acc)
+                  scan(chars, [FloatLit(val), ..tokens])
+                }
+                False -> {
+                  let assert Ok(val) = int.parse(acc)
+                  scan(chars, [IntLit(val), ..tokens])
+                }
+              }
+            }
+          }
         }
       }
     }
+
+    // Reached the end of the file
     [] -> {
-      let assert Ok(val) = int.parse(acc)
-      list.reverse([Eof, IntLit(val), ..tokens])
+      case has_dot {
+        True -> {
+          let assert Ok(val) = float.parse(acc)
+          list.reverse([Eof, FloatLit(val), ..tokens])
+        }
+        False -> {
+          let assert Ok(val) = int.parse(acc)
+          list.reverse([Eof, IntLit(val), ..tokens])
+        }
+      }
     }
   }
 }

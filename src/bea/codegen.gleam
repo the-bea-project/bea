@@ -1,5 +1,6 @@
 // src/bea/codegen.gleam
 import bea/ast
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/result
@@ -191,8 +192,6 @@ fn generate_statement(stmt: ast.Statement) -> String {
     }
 
     ast.ImportStmt(_) -> ""
-
-    ast.Echo(expr) -> "echo " <> generate_expression(expr)
   }
 }
 
@@ -290,6 +289,7 @@ fn generate_pattern(expr: ast.Expr) -> String {
 fn generate_expression(expr: ast.Expr) -> String {
   case expr {
     ast.IntExpr(val) -> int.to_string(val)
+    ast.FloatExpr(val) -> float.to_string(val)
     ast.StringExpr(val) -> "\"" <> val <> "\""
     ast.IdentExpr(name) -> name
 
@@ -316,6 +316,8 @@ fn generate_expression(expr: ast.Expr) -> String {
       let args_str = args |> list.map(generate_expression) |> string.join(", ")
       name <> "(" <> args_str <> ")"
     }
+
+    ast.EchoExpr(inner) -> "{ echo " <> generate_expression(inner) <> " }"
 
     // Generate list syntax
     ast.ListExpr(elements) -> {

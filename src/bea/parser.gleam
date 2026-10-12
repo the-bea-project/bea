@@ -27,12 +27,6 @@ fn parse_statements(
       parse_def(False, name, rest, acc)
     }
 
-    // (The old duplicate block was safely removed from here!)
-    [lexer.Echo, ..rest] -> {
-      let #(expr, after_expr) = parse_expression(rest)
-      parse_statements(after_expr, [ast.Echo(expr), ..acc])
-    }
-
     [lexer.Import, ..rest] -> {
       let #(path, after_path) = parse_import_path(rest, "")
       parse_statements(after_path, [ast.ImportStmt(path), ..acc])
@@ -97,11 +91,18 @@ fn collapse_clauses(statements: List(ast.Statement)) -> List(ast.Statement) {
 fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
   case tokens {
     [lexer.IntLit(val), ..rest] -> #(ast.IntExpr(val), rest)
+    [lexer.FloatLit(val), ..rest] -> #(ast.FloatExpr(val), rest)
     [lexer.StringLit(val), ..rest] -> #(ast.StringExpr(val), rest)
 
     [lexer.Not, ..rest] -> {
       let #(inner_expr, after_inner) = parse_primary(rest)
       #(ast.UnaryExpr("not", inner_expr), after_inner)
+    }
+
+    // Echo Expression
+    [lexer.Echo, ..rest] -> {
+      let #(expr, after_expr) = parse_expression(rest)
+      #(ast.EchoExpr(expr), after_expr)
     }
 
     // Standard function calls (e.g., calculate(10))
@@ -141,49 +142,85 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
 
 fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
   let #(left, after_left) = parse_primary(tokens)
+  continue_expression(left, after_left)
+}
 
+// This helper lets us endlessly chain operators without breaking!
+fn continue_expression(
+  left: ast.Expr,
+  after_left: List(Token),
+) -> #(ast.Expr, List(Token)) {
   case after_left {
+    // SYNTACTIC SUGAR: Wraps the ENTIRE left-hand pipeline inside the echo!
+    [lexer.PipeRight, lexer.Echo, ..rest] -> {
+      continue_expression(ast.EchoExpr(left), rest)
+    }
+
+    [lexer.PipeRight, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      // <--- CHANGED HERE
+      continue_expression(ast.BinaryExpr(left, "|>", right), after_right)
+    }
     [lexer.Plus, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "+", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      // <--- CHANGED HERE
+      continue_expression(ast.BinaryExpr(left, "+", right), after_right)
     }
     [lexer.Minus, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "-", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      // <--- CHANGED HERE
+      continue_expression(ast.BinaryExpr(left, "-", right), after_right)
     }
     [lexer.Star, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "*", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "*", right), after_right)
     }
     [lexer.Slash, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "/", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "/", right), after_right)
+    }
+    [lexer.PlusDot, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "+.", right), after_right)
+    }
+    [lexer.MinusDot, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "-.", right), after_right)
+    }
+    [lexer.StarDot, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "*.", right), after_right)
+    }
+    [lexer.SlashDot, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "/.", right), after_right)
     }
     [lexer.Greater, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, ">", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, ">", right), after_right)
     }
     [lexer.EqEq, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "==", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "==", right), after_right)
     }
     [lexer.BangEq, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "!=", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "!=", right), after_right)
     }
     [lexer.Concat, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "<>", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "<>", right), after_right)
     }
     [lexer.And, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "and", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "and", right), after_right)
     }
     [lexer.Or, ..rest] -> {
-      let #(right, after_right) = parse_expression(rest)
-      #(ast.BinaryExpr(left, "or", right), after_right)
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "or", right), after_right)
     }
 
+    // Catch-all: no operators found, return the expression as-is
     _ -> #(left, after_left)
   }
 }
@@ -210,11 +247,6 @@ fn parse_block(
     [lexer.If, ..rest] -> {
       let #(if_stmt, after_if) = parse_if(rest)
       parse_block(after_if, [if_stmt, ..acc])
-    }
-
-    [lexer.Echo, ..rest] -> {
-      let #(expr, after_expr) = parse_expression(rest)
-      parse_block(after_expr, [ast.Echo(expr), ..acc])
     }
 
     // Catch-all: Standalone expression

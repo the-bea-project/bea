@@ -93,15 +93,16 @@
               "match": "\\\\."
             },
             {
-              "name": "meta.interpolation.bea",
+              "name": "meta.embedded.line.bea",
               "begin": "#\\{",
               "end": "\\}",
               "beginCaptures": {
-                "0": { "name": "punctuation.section.interpolation.begin.bea" }
+                "0": { "name": "punctuation.section.embedded.begin.bea" }
               },
               "endCaptures": {
-                "0": { "name": "punctuation.section.interpolation.end.bea" }
+                "0": { "name": "punctuation.section.embedded.end.bea" }
               },
+              "contentName": "source.bea",
               "patterns": [
                 { "include": "$self" }
               ]
