@@ -122,6 +122,9 @@ fn scan(chars: List(String), tokens: List(Token)) {
     ["*", ".", ..rest] -> scan(rest, [StarDot, ..tokens])
     ["/", ".", ..rest] -> scan(rest, [SlashDot, ..tokens])
 
+    // Comments: intercept // and throw away the rest of the line
+    ["/", "/", ..rest] -> consume_comment(rest, tokens)
+
     // Single-character symbols
     ["(", ..rest] -> scan(rest, [LParen, ..tokens])
     [")", ..rest] -> scan(rest, [RParen, ..tokens])
@@ -359,4 +362,17 @@ fn consume_number(
 
 fn is_digit(char: String) -> Bool {
   string.contains("0123456789", char)
+}
+
+fn consume_comment(chars: List(String), tokens: List(Token)) -> List(Token) {
+  case chars {
+    // Reached the end of the file while inside a comment
+    [] -> list.reverse([Eof, ..tokens])
+
+    // Found the end of the line! Go back to normal scanning
+    ["\n", ..rest] -> scan(rest, tokens)
+
+    // Anything else: throw it away and keep consuming
+    [_, ..rest] -> consume_comment(rest, tokens)
+  }
 }

@@ -4,6 +4,7 @@
 import bea/ast
 import bea/lexer.{type Token}
 import gleam/list
+import gleam/string
 
 pub fn parse(tokens: List(Token)) -> ast.Program {
   let statements = parse_statements(tokens, [])
@@ -49,10 +50,10 @@ fn parse_pattern_params(
 
       // 2. Intercept type annotations (e.g., `: Int`)
       let #(final_expr, after_type) = case after_expr {
-        [lexer.Colon, lexer.TypeIdent(type_name), ..rest2] -> #(
-          ast.TypedExpr(expr, type_name),
-          rest2,
-        )
+        [lexer.Colon, ..rest2] -> {
+          let #(type_str, rest3) = parse_type(rest2)
+          #(ast.TypedExpr(expr, type_str), rest3)
+        }
         _ -> #(expr, after_expr)
       }
 
@@ -99,6 +100,14 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       #(ast.UnaryExpr("not", inner_expr), after_inner)
     }
 
+    // Anonymous functions (e.g., fn(x) { x.1 == 42 })
+    [lexer.Fn, lexer.LParen, ..rest] -> {
+      let #(params, after_params) = parse_pattern_params(rest, [])
+      let assert [lexer.LBrace, ..after_brace] = after_params
+      let #(body, after_block) = parse_block(after_brace, [])
+      #(ast.AnonFnExpr(params, body), after_block)
+    }
+
     // Echo Expression
     [lexer.Echo, ..rest] -> {
       let #(expr, after_expr) = parse_expression(rest)
@@ -121,6 +130,19 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     [lexer.LBracket, ..rest] -> {
       let #(elements, after_elements) = parse_list_elements(rest, [])
       #(ast.ListExpr(elements), after_elements)
+    }
+
+    // Parentheses: Grouping OR Tuples!
+    [lexer.LParen, ..rest] -> {
+      let #(elements, after_parens) = parse_tuple_or_group(rest, [])
+      case elements {
+        [] -> #(ast.IdentExpr("Nil"), after_parens)
+        // () evaluates to Nil
+        [single] -> #(single, after_parens)
+        // (1 + 2) evaluates to 3
+        _ -> #(ast.TupleExpr(elements), after_parens)
+        // (1, 2) evaluates to a Tuple
+      }
     }
 
     // For module calls like `io.println()`
@@ -168,6 +190,11 @@ fn continue_expression(
   after_left: List(Token),
 ) -> #(ast.Expr, List(Token)) {
   case after_left {
+    // Tuple Indexing (e.g., coords.0 or get_tuple().1)
+    [lexer.Dot, lexer.IntLit(idx), ..rest] -> {
+      continue_expression(ast.TupleIndexExpr(left, idx), rest)
+    }
+
     // SYNTACTIC SUGAR: Wraps the ENTIRE left-hand pipeline inside the echo!
     [lexer.PipeRight, lexer.Echo, ..rest] -> {
       continue_expression(ast.EchoExpr(left), rest)
@@ -366,7 +393,7 @@ fn parse_def(
   let #(params, after_params) = parse_pattern_params(rest, [])
 
   let #(return_type, after_ret) = case after_params {
-    [lexer.Arrow, lexer.TypeIdent(t), ..rest2] -> #(t, rest2)
+    [lexer.Arrow, ..rest2] -> parse_type(rest2)
     _ -> #("", after_params)
   }
 
@@ -444,5 +471,64 @@ fn parse_patterns(
   case after_pat {
     [lexer.Pipe, ..rest] -> parse_patterns(rest, [pat, ..acc])
     _ -> #(list.reverse([pat, ..acc]), after_pat)
+  }
+}
+
+fn parse_tuple_or_group(
+  tokens: List(Token),
+  acc: List(ast.Expr),
+) -> #(List(ast.Expr), List(Token)) {
+  case tokens {
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      let #(expr, after_expr) = parse_expression(tokens)
+
+      case after_expr {
+        [lexer.Comma, ..rest] -> parse_tuple_or_group(rest, [expr, ..acc])
+        [lexer.RParen, ..rest] -> #(list.reverse([expr, ..acc]), rest)
+        _ -> panic as "Syntax Error: Expected ',' or ')' in tuple/group"
+      }
+    }
+  }
+}
+
+fn parse_type(tokens: List(Token)) -> #(String, List(Token)) {
+  case tokens {
+    // e.g. List(Int) or Result(String, Error)
+    [lexer.TypeIdent(name), lexer.LParen, ..rest] -> {
+      let #(args, after_args) = parse_type_args(rest, [])
+      #(name <> "(" <> string.join(args, ", ") <> ")", after_args)
+    }
+    // e.g. String or Int
+    [lexer.TypeIdent(name), ..rest] -> #(name, rest)
+
+    // e.g. Type variables like `a` in `List(a)`
+    [lexer.Ident(name), ..rest] -> #(name, rest)
+
+    // Tuple types! e.g. (String, Int)
+    [lexer.LParen, ..rest] -> {
+      let #(args, after_args) = parse_type_args(rest, [])
+      // We immediately format it into Gleam's #(...) syntax so codegen doesn't have to!
+      #("#(" <> string.join(args, ", ") <> ")", after_args)
+    }
+    _ -> panic as "Syntax Error: Expected a type after ':' or '->'"
+  }
+}
+
+fn parse_type_args(
+  tokens: List(Token),
+  acc: List(String),
+) -> #(List(String), List(Token)) {
+  case tokens {
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      let #(t, after_t) = parse_type(tokens)
+
+      case after_t {
+        [lexer.Comma, ..rest] -> parse_type_args(rest, [t, ..acc])
+        [lexer.RParen, ..rest] -> #(list.reverse([t, ..acc]), rest)
+        _ -> panic as "Syntax Error: Expected ',' or ')' in type parameters"
+      }
+    }
   }
 }

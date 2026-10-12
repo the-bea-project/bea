@@ -334,6 +334,23 @@ fn generate_expression(expr: ast.Expr) -> String {
         clauses |> list.map(generate_case_clause) |> string.join("\n    ")
       "case " <> sub_str <> " {\n    " <> clauses_str <> "\n  }"
     }
+
+    ast.TupleExpr(elements) -> {
+      let elements_str =
+        elements |> list.map(generate_expression) |> string.join(", ")
+      "#(" <> elements_str <> ")"
+    }
+
+    ast.TupleIndexExpr(tuple, idx) -> {
+      generate_expression(tuple) <> "." <> int.to_string(idx)
+    }
+
+    ast.AnonFnExpr(params, body) -> {
+      let params_str = params |> list.map(generate_pattern) |> string.join(", ")
+      let body_str =
+        body |> list.map(generate_statement) |> string.join("\n      ")
+      "fn(" <> params_str <> ") {\n      " <> body_str <> "\n    }"
+    }
   }
 }
 

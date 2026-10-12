@@ -18,6 +18,12 @@ pub type Expr {
   EchoExpr(Expr)
   CondExpr(clauses: List(CondClause))
   CaseExpr(subject: Expr, clauses: List(CaseClause))
+  // Tuple expression `("a", 2)`
+  TupleExpr(elements: List(Expr))
+  // Indexed tuples `tuple.0`
+  TupleIndexExpr(tuple: Expr, index: Int)
+  // Anon functions `fn(x) {...}`
+  AnonFnExpr(params: List(Expr), body: List(Statement))
 }
 
 pub type Clause {
