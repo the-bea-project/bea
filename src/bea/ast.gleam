@@ -43,10 +43,12 @@ pub type Expr {
   )
   // Record field access (e.g., team.coach.name)
   RecordAccessExpr(base: Expr, field: String)
+  // Pattern aliasing: e.g., [head | _] as list
+  AliasExpr(pattern: Expr, name: String)
 }
 
 pub type Clause {
-  Clause(params: List(Expr), body: List(Statement))
+  Clause(params: List(Expr), guard: List(Expr), body: List(Statement))
 }
 
 pub type CondClause {

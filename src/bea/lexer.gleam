@@ -42,7 +42,9 @@ pub type Token {
   Bang
   Eq
   Less
+  LessEq
   Greater
+  GreaterEq
   Plus
   Minus
   Star
@@ -116,6 +118,8 @@ fn scan(chars: List(String), tokens: List(Token)) {
     ["|", ">", ..rest] -> scan(rest, [PipeRight, ..tokens])
     ["!", "=", ..rest] -> scan(rest, [BangEq, ..tokens])
     ["=", "=", ..rest] -> scan(rest, [EqEq, ..tokens])
+    [">", "=", ..rest] -> scan(rest, [GreaterEq, ..tokens])
+    ["<", "=", ..rest] -> scan(rest, [LessEq, ..tokens])
 
     ["+", ".", ..rest] -> scan(rest, [PlusDot, ..tokens])
     ["-", ".", ..rest] -> scan(rest, [MinusDot, ..tokens])

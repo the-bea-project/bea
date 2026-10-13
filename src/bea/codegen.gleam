@@ -143,7 +143,8 @@ fn generate_statement(stmt: ast.Statement) -> String {
       }
 
       case clauses {
-        [ast.Clause(params, body)] -> {
+        // Only simple single-clauses WITHOUT guards stay as standard functions
+        [ast.Clause(params, [], body)] -> {
           case is_simple_params(params) {
             True -> {
               let params_str =
@@ -157,16 +158,13 @@ fn generate_statement(stmt: ast.Statement) -> String {
               <> params_str
               <> ")"
               <> ret_str
-              // INJECTED HERE
               <> " {\n  "
               <> body_str
               <> "\n}"
             }
-            // PASSED return_type
             False -> generate_multi_clause(is_pub, name, return_type, clauses)
           }
         }
-        // PASSED return_type
         _ -> generate_multi_clause(is_pub, name, return_type, clauses)
       }
     }
@@ -276,7 +274,8 @@ fn generate_multi_clause(
     t -> " -> " <> t
   }
 
-  let first_clause = list.first(clauses) |> result.unwrap(ast.Clause([], []))
+  let first_clause =
+    list.first(clauses) |> result.unwrap(ast.Clause([], [], []))
   let arity = list.length(first_clause.params)
 
   let args = make_synthetic_params(0, arity, [])
@@ -330,13 +329,19 @@ fn is_simple_params(params: List(ast.Expr)) -> Bool {
 }
 
 fn generate_clause_arm(clause: ast.Clause) -> String {
-  let ast.Clause(params, body) = clause
+  let ast.Clause(params, guard, body) = clause
 
   let pattern_str = params |> list.map(generate_pattern) |> string.join(", ")
 
+  let guard_str = case guard {
+    [] -> ""
+    [g] -> " if " <> generate_expression(g)
+    _ -> ""
+  }
+
   let body_str = body |> list.map(generate_statement) |> string.join("\n      ")
 
-  pattern_str <> " -> {\n      " <> body_str <> "\n    }"
+  pattern_str <> guard_str <> " -> {\n      " <> body_str <> "\n    }"
 }
 
 fn generate_pattern(expr: ast.Expr) -> String {
@@ -347,7 +352,10 @@ fn generate_pattern(expr: ast.Expr) -> String {
     ast.TypedExpr(inner, type_name) ->
       generate_pattern(inner) <> ": " <> type_name
 
-    // ADDED THESE 3 NEW PATTERNS:
+    ast.AliasExpr(pattern, name) -> {
+      generate_pattern(pattern) <> " as " <> name
+    }
+
     ast.ListExpr(elements) -> {
       let elements_str =
         elements |> list.map(generate_pattern) |> string.join(", ")
@@ -389,6 +397,10 @@ fn generate_expression(expr: ast.Expr) -> String {
     ast.FloatExpr(val) -> float.to_string(val)
     ast.StringExpr(val) -> "\"" <> val <> "\""
     ast.IdentExpr(name) -> name
+
+    ast.AliasExpr(pattern, name) -> {
+      generate_expression(pattern) <> " as " <> name
+    }
 
     ast.UnaryExpr("not", inner) -> "!" <> generate_expression(inner)
     ast.UnaryExpr(op, _) -> panic as { "Unsupported unary operator: " <> op }

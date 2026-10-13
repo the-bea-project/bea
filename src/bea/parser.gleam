@@ -246,6 +246,10 @@ fn continue_expression(
       continue_expression(ast.RecordAccessExpr(left, field), rest)
     }
 
+    [lexer.Ident("as"), lexer.Ident(alias_name), ..rest] -> {
+      continue_expression(ast.AliasExpr(left, alias_name), rest)
+    }
+
     // The `?` Try Operator
     [lexer.Question, ..rest] -> {
       continue_expression(ast.TryExpr(left), rest)
@@ -258,17 +262,14 @@ fn continue_expression(
 
     [lexer.PipeRight, ..rest] -> {
       let #(right, after_right) = parse_primary(rest)
-      // <--- CHANGED HERE
       continue_expression(ast.BinaryExpr(left, "|>", right), after_right)
     }
     [lexer.Plus, ..rest] -> {
       let #(right, after_right) = parse_primary(rest)
-      // <--- CHANGED HERE
       continue_expression(ast.BinaryExpr(left, "+", right), after_right)
     }
     [lexer.Minus, ..rest] -> {
       let #(right, after_right) = parse_primary(rest)
-      // <--- CHANGED HERE
       continue_expression(ast.BinaryExpr(left, "-", right), after_right)
     }
     [lexer.Star, ..rest] -> {
@@ -298,6 +299,18 @@ fn continue_expression(
     [lexer.Greater, ..rest] -> {
       let #(right, after_right) = parse_primary(rest)
       continue_expression(ast.BinaryExpr(left, ">", right), after_right)
+    }
+    [lexer.GreaterEq, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, ">=", right), after_right)
+    }
+    [lexer.Less, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "<", right), after_right)
+    }
+    [lexer.LessEq, ..rest] -> {
+      let #(right, after_right) = parse_primary(rest)
+      continue_expression(ast.BinaryExpr(left, "<=", right), after_right)
     }
     [lexer.EqEq, ..rest] -> {
       let #(right, after_right) = parse_primary(rest)
@@ -499,10 +512,19 @@ fn parse_def(
     _ -> #("", after_params)
   }
 
-  case after_ret {
+  // Intercept the `if` guard before the body block
+  let #(guard, after_guard) = case after_ret {
+    [lexer.If, ..rest_guard] -> {
+      let #(g, after_g) = parse_expression(rest_guard)
+      #([g], after_g)
+    }
+    _ -> #([], after_ret)
+  }
+
+  case after_guard {
     [lexer.LBrace, ..after_brace] -> {
       let #(body, after_block) = parse_block(after_brace, [])
-      let clause = ast.Clause(params: params, body: body)
+      let clause = ast.Clause(params: params, guard: guard, body: body)
       let def_stmt =
         ast.DefStmt(
           is_pub: is_pub,
@@ -513,10 +535,9 @@ fn parse_def(
       parse_statements(after_block, [def_stmt, ..acc])
     }
 
-    // FUNCTION HEAD! (No braces found)
+    // FUNCTION HEAD (No braces found)
     _ -> {
-      // Store the signature as a clause with an empty body
-      let clause = ast.Clause(params: params, body: [])
+      let clause = ast.Clause(params: params, guard: [], body: [])
       let def_stmt =
         ast.DefStmt(
           is_pub: is_pub,
@@ -525,8 +546,7 @@ fn parse_def(
           clauses: [clause],
         )
 
-      // Continue parsing from `after_ret` (the next token after the signature)
-      parse_statements(after_ret, [def_stmt, ..acc])
+      parse_statements(after_guard, [def_stmt, ..acc])
     }
   }
 }
