@@ -126,9 +126,19 @@ fn generate_statement(stmt: ast.Statement) -> String {
     // 2. Gleam doesn't use the `return` keyword, so we just output the expression
     ast.ReturnStmt(expr) -> generate_expression(expr)
 
-    // 3. Map assignments to `let`
-    ast.AssignStmt(name, expr) ->
-      "let " <> name <> " = " <> generate_expression(expr)
+    // 3. Map assignments to `let` or `let assert`
+    ast.AssignStmt(pattern_expr, value_expr) -> {
+      let pat_str = generate_pattern(pattern_expr)
+      let val_str = generate_expression(value_expr)
+
+      case pattern_expr {
+        // Simple variables get standard `let`
+        ast.IdentExpr(_) -> "let " <> pat_str <> " = " <> val_str
+
+        // Everything else (Lists, Tuples, etc.) gets `let assert`
+        _ -> "let assert " <> pat_str <> " = " <> val_str
+      }
+    }
 
     // 4. Standalone expressions
     ast.ExprStmt(expr) -> generate_expression(expr)
@@ -199,15 +209,12 @@ fn generate_multi_clause(
   is_pub: Bool,
   name: String,
   return_type: String,
-  // ADDED HERE
   clauses: List(ast.Clause),
 ) -> String {
   let pub_prefix = case is_pub {
     True -> "pub "
     False -> ""
   }
-
-  // Build the return string
   let ret_str = case return_type {
     "" -> ""
     t -> " -> " <> t
@@ -216,17 +223,29 @@ fn generate_multi_clause(
   let first_clause = list.first(clauses) |> result.unwrap(ast.Clause([], []))
   let arity = list.length(first_clause.params)
 
-  let synthetic_params = make_synthetic_params(0, arity, [])
-  let params_def = string.join(synthetic_params, ", ")
+  let args = make_synthetic_params(0, arity, [])
 
-  let match_target = case arity {
-    1 -> string.join(synthetic_params, "")
-    _ -> "#(" <> string.join(synthetic_params, ", ") <> ")"
-  }
+  // 1. Attach types from the Function Head to our generated arguments
+  let typed_args =
+    list.zip(args, first_clause.params)
+    |> list.map(fn(pair) {
+      let #(arg, p) = pair
+      case p {
+        ast.TypedExpr(_, type_name) -> arg <> ": " <> type_name
+        _ -> arg
+      }
+    })
+
+  let params_def = string.join(typed_args, ", ")
+
+  let match_target = string.join(args, ", ")
+
+  // 2. Filter out the Function Head so we don't generate an empty case block
+  let valid_clauses = list.filter(clauses, fn(c) { c.body != [] })
 
   let cases_str =
-    clauses
-    |> list.map(fn(c) { generate_clause_arm(c, arity) })
+    valid_clauses
+    |> list.map(generate_clause_arm)
     |> string.join("\n    ")
 
   pub_prefix
@@ -236,7 +255,6 @@ fn generate_multi_clause(
   <> params_def
   <> ")"
   <> ret_str
-  // INJECTED HERE
   <> " {\n  case "
   <> match_target
   <> " {\n    "
@@ -255,20 +273,10 @@ fn is_simple_params(params: List(ast.Expr)) -> Bool {
   })
 }
 
-fn generate_clause_arm(clause: ast.Clause, arity: Int) -> String {
+fn generate_clause_arm(clause: ast.Clause) -> String {
   let ast.Clause(params, body) = clause
 
-  let pattern_str = case arity {
-    1 ->
-      case list.first(params) {
-        Ok(p) -> generate_pattern(p)
-        Error(_) -> ""
-      }
-    _ ->
-      "#("
-      <> { params |> list.map(generate_pattern) |> string.join(", ") }
-      <> ")"
-  }
+  let pattern_str = params |> list.map(generate_pattern) |> string.join(", ")
 
   let body_str = body |> list.map(generate_statement) |> string.join("\n      ")
 
@@ -282,6 +290,24 @@ fn generate_pattern(expr: ast.Expr) -> String {
     ast.IdentExpr(name) -> name
     ast.TypedExpr(inner, type_name) ->
       generate_pattern(inner) <> ": " <> type_name
+
+    // ADDED THESE 3 NEW PATTERNS:
+    ast.ListExpr(elements) -> {
+      let elements_str =
+        elements |> list.map(generate_pattern) |> string.join(", ")
+      "[" <> elements_str <> "]"
+    }
+
+    ast.ListConsExpr(head, tail) -> {
+      "[" <> generate_pattern(head) <> ", .." <> generate_pattern(tail) <> "]"
+    }
+
+    ast.TupleExpr(elements) -> {
+      let elements_str =
+        elements |> list.map(generate_pattern) |> string.join(", ")
+      "#(" <> elements_str <> ")"
+    }
+
     _ -> panic as "Unsupported pattern expression"
   }
 }
@@ -324,6 +350,14 @@ fn generate_expression(expr: ast.Expr) -> String {
       let elements_str =
         elements |> list.map(generate_expression) |> string.join(", ")
       "[" <> elements_str <> "]"
+    }
+
+    ast.ListConsExpr(head, tail) -> {
+      "["
+      <> generate_expression(head)
+      <> ", .."
+      <> generate_expression(tail)
+      <> "]"
     }
 
     ast.CondExpr(clauses) -> generate_cond(clauses)

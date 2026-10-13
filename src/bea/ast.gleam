@@ -11,6 +11,8 @@ pub type Expr {
   BinaryExpr(left: Expr, op: String, right: Expr)
   // A list of expressions, e.g., [1, 2, 3]
   ListExpr(elements: List(Expr))
+  // Head tail implementation
+  ListConsExpr(head: Expr, tail: Expr)
   // Typed expression, e.g. param: Int
   TypedExpr(expr: Expr, type_name: String)
   UnaryExpr(op: String, expr: Expr)
@@ -56,7 +58,7 @@ pub type Statement {
   ExprStmt(Expr)
 
   // Assign a value to a variable
-  AssignStmt(name: String, value: Expr)
+  AssignStmt(pattern: Expr, value: Expr)
 
   // If control flow
   IfStmt(condition: Expr, body: List(Statement), else_body: List(Statement))

@@ -127,10 +127,7 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     }
 
     // Intercept Lists
-    [lexer.LBracket, ..rest] -> {
-      let #(elements, after_elements) = parse_list_elements(rest, [])
-      #(ast.ListExpr(elements), after_elements)
-    }
+    [lexer.LBracket, ..rest] -> parse_list_elements(rest, [])
 
     // Parentheses: Grouping OR Tuples!
     [lexer.LParen, ..rest] -> {
@@ -281,22 +278,29 @@ fn parse_block(
       parse_block(after_expr, [ast.ReturnStmt(expr), ..acc])
     }
 
-    // Variable Assignment (e.g., status = "active")
-    [lexer.Ident(name), lexer.Eq, ..rest] -> {
-      let #(expr, after_expr) = parse_expression(rest)
-      parse_block(after_expr, [ast.AssignStmt(name, expr), ..acc])
-    }
-
     // If / Else statements
     [lexer.If, ..rest] -> {
       let #(if_stmt, after_if) = parse_if(rest)
       parse_block(after_if, [if_stmt, ..acc])
     }
 
-    // Catch-all: Standalone expression
+    // Catch-all: Standalone expressions & assignments
     _ -> {
+      // Parse whatever is on the left
       let #(expr, after_expr) = parse_expression(tokens)
-      parse_block(after_expr, [ast.ExprStmt(expr), ..acc])
+
+      case after_expr {
+        // If the next token is '=', it's an assignment!
+        [lexer.Eq, ..rest] -> {
+          let #(val_expr, after_val) = parse_expression(rest)
+          parse_block(after_val, [ast.AssignStmt(expr, val_expr), ..acc])
+        }
+
+        // Otherwise, it's just a normal standalone expression
+        _ -> {
+          parse_block(after_expr, [ast.ExprStmt(expr), ..acc])
+        }
+      }
     }
   }
 }
@@ -327,19 +331,38 @@ fn parse_args(
 fn parse_list_elements(
   tokens: List(Token),
   acc: List(ast.Expr),
-) -> #(List(ast.Expr), List(Token)) {
+) -> #(ast.Expr, List(Token)) {
   case tokens {
-    // Empty list or reached the end
-    [lexer.RBracket, ..rest] -> #(list.reverse(acc), rest)
+    // Empty list []
+    [lexer.RBracket, ..rest] -> #(ast.ListExpr(list.reverse(acc)), rest)
 
-    // Otherwise, parse an expression
     _ -> {
       let #(expr, after_expr) = parse_expression(tokens)
 
       case after_expr {
+        // Head / Tail Cons Syntax: [head | tail]
+        [lexer.Pipe, ..rest] -> {
+          let #(tail_expr, after_tail) = parse_expression(rest)
+          case after_tail {
+            [lexer.RBracket, ..final_rest] -> #(
+              ast.ListConsExpr(expr, tail_expr),
+              final_rest,
+            )
+            _ ->
+              panic as "Syntax Error: Expected ']' after tail in list cons [head | tail]"
+          }
+        }
+
+        // Standard comma-separated list item: [1, 2, 3]
         [lexer.Comma, ..rest] -> parse_list_elements(rest, [expr, ..acc])
-        [lexer.RBracket, ..rest] -> #(list.reverse([expr, ..acc]), rest)
-        _ -> panic as "Syntax Error: Expected ',' or ']' in list"
+
+        // End of standard list
+        [lexer.RBracket, ..rest] -> #(
+          ast.ListExpr(list.reverse([expr, ..acc])),
+          rest,
+        )
+
+        _ -> panic as "Syntax Error: Expected ',', '|', or ']' in list"
       }
     }
   }
@@ -401,7 +424,6 @@ fn parse_def(
     [lexer.LBrace, ..after_brace] -> {
       let #(body, after_block) = parse_block(after_brace, [])
       let clause = ast.Clause(params: params, body: body)
-      // Pass the return_type here
       let def_stmt =
         ast.DefStmt(
           is_pub: is_pub,
@@ -411,8 +433,22 @@ fn parse_def(
         )
       parse_statements(after_block, [def_stmt, ..acc])
     }
-    _ ->
-      panic as "Syntax Error: Expected '{' after function parameters or return type"
+
+    // FUNCTION HEAD! (No braces found)
+    _ -> {
+      // Store the signature as a clause with an empty body
+      let clause = ast.Clause(params: params, body: [])
+      let def_stmt =
+        ast.DefStmt(
+          is_pub: is_pub,
+          name: name,
+          return_type: return_type,
+          clauses: [clause],
+        )
+
+      // Continue parsing from `after_ret` (the next token after the signature)
+      parse_statements(after_ret, [def_stmt, ..acc])
+    }
   }
 }
 

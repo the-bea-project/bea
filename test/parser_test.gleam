@@ -19,7 +19,8 @@ pub fn parser_basic_function_test() {
   let tree = parser.parse(tokens)
 
   let expected_body = [
-    ast.AssignStmt("status", ast.StringExpr("active")),
+    // UPDATED: AssignStmt now takes an ast.IdentExpr instead of a String
+    ast.AssignStmt(ast.IdentExpr("status"), ast.StringExpr("active")),
     ast.ExprStmt(
       ast.CallExpr("notify", [ast.IdentExpr("user_id"), ast.IdentExpr("status")]),
     ),
@@ -32,7 +33,6 @@ pub fn parser_basic_function_test() {
       expected_body,
     )
 
-  // ADDED the "" for the return_type parameter
   let expected_def = ast.DefStmt(False, "process", "", [expected_clause])
 
   tree
@@ -60,7 +60,6 @@ pub fn parser_if_statement_test() {
 
   let expected_clause = ast.Clause([ast.IdentExpr("status")], expected_body)
 
-  // ADDED the "" for the return_type parameter
   let expected_def = ast.DefStmt(False, "check_status", "", [expected_clause])
 
   tree
