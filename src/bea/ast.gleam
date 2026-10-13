@@ -1,5 +1,12 @@
 // src/bea/ast.gleam
 
+pub type TypeVariant {
+  // name: "User" or "Active"
+  // fields: [("name", "String"), ("age", "Int")] 
+  // (If there are no fields, it's just an empty list)
+  TypeVariant(name: String, fields: List(#(String, String)))
+}
+
 pub type Expr {
   IntExpr(Int)
   FloatExpr(Float)
@@ -65,6 +72,9 @@ pub type Statement {
 
   // Import
   ImportStmt(path: String)
+
+  // Custom Types (Structs and Enums)
+  CustomTypeStmt(is_pub: Bool, name: String, variants: List(TypeVariant))
 }
 
 // A full Bea program is just a list of top-level statements

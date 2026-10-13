@@ -54,7 +54,7 @@ fn collect_imports(
 // Checks specific AST nodes for features that require Gleam standard libraries
 fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
   case stmt {
-    // ADDED an extra '_' here so there are 4 arguments total
+    // extra '_' here so there are 4 arguments total
     ast.DefStmt(_, _, _, clauses) ->
       list.fold(clauses, imports, fn(acc, clause) {
         collect_imports(clause.body, acc)
@@ -81,6 +81,41 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
 
 fn generate_statement(stmt: ast.Statement) -> String {
   case stmt {
+    // Custom Types (Structs and Enums)
+    ast.CustomTypeStmt(is_pub, name, variants) -> {
+      let pub_prefix = case is_pub {
+        True -> "pub "
+        False -> ""
+      }
+
+      let variants_str =
+        variants
+        |> list.map(fn(v) {
+          let ast.TypeVariant(v_name, fields) = v
+          case fields {
+            [] -> v_name
+            _ -> {
+              let fields_str =
+                fields
+                |> list.map(fn(f) {
+                  let #(f_name, f_type) = f
+                  case f_name {
+                    "" -> f_type
+                    // Unlabeled: just output the type (e.g., "Int")
+                    _ -> f_name <> ": " <> f_type
+                    // Labeled: output "name: String"
+                  }
+                })
+                |> string.join(", ")
+              v_name <> "(" <> fields_str <> ")"
+            }
+          }
+        })
+        |> string.join("\n  ")
+
+      pub_prefix <> "type " <> name <> " {\n  " <> variants_str <> "\n}"
+    }
+
     // ADDED return_type here
     ast.DefStmt(is_pub, name, return_type, clauses) -> {
       let pub_prefix = case is_pub {
@@ -306,6 +341,12 @@ fn generate_pattern(expr: ast.Expr) -> String {
       let elements_str =
         elements |> list.map(generate_pattern) |> string.join(", ")
       "#(" <> elements_str <> ")"
+    }
+
+    // Allows destructuring variants with arguments, e.g., Walk(k)
+    ast.CallExpr(name, args) -> {
+      let args_str = args |> list.map(generate_pattern) |> string.join(", ")
+      name <> "(" <> args_str <> ")"
     }
 
     _ -> panic as "Unsupported pattern expression"

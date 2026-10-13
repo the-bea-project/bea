@@ -33,6 +33,16 @@ fn parse_statements(
       parse_statements(after_path, [ast.ImportStmt(path), ..acc])
     }
 
+    // Handle `pub type`
+    [lexer.Pub, lexer.Type, lexer.TypeIdent(name), lexer.LBrace, ..rest] -> {
+      parse_custom_type(True, name, rest, acc)
+    }
+
+    // Handle private `type`
+    [lexer.Type, lexer.TypeIdent(name), lexer.LBrace, ..rest] -> {
+      parse_custom_type(False, name, rest, acc)
+    }
+
     [_, ..rest] -> parse_statements(rest, acc)
   }
 }
@@ -566,5 +576,72 @@ fn parse_type_args(
         _ -> panic as "Syntax Error: Expected ',' or ')' in type parameters"
       }
     }
+  }
+}
+
+fn parse_custom_type(
+  is_pub: Bool,
+  name: String,
+  tokens: List(Token),
+  acc: List(ast.Statement),
+) -> List(ast.Statement) {
+  let #(variants, after_brace) = parse_type_variants(tokens, [])
+  let stmt = ast.CustomTypeStmt(is_pub, name, variants)
+  parse_statements(after_brace, [stmt, ..acc])
+}
+
+fn parse_type_variants(
+  tokens: List(Token),
+  acc: List(ast.TypeVariant),
+) -> #(List(ast.TypeVariant), List(Token)) {
+  case tokens {
+    [lexer.RBrace, ..rest] -> #(list.reverse(acc), rest)
+
+    // Variant with fields, e.g. User(name: String, age: Int)
+    [lexer.TypeIdent(v_name), lexer.LParen, ..rest] -> {
+      let #(fields, after_fields) = parse_type_fields(rest, [])
+      parse_type_variants(after_fields, [ast.TypeVariant(v_name, fields), ..acc])
+    }
+
+    // Simple Variant without fields, e.g. Active or Offline
+    [lexer.TypeIdent(v_name), ..rest] -> {
+      parse_type_variants(rest, [ast.TypeVariant(v_name, []), ..acc])
+    }
+
+    _ -> panic as "Syntax Error: Expected a variant in custom type definition"
+  }
+}
+
+fn parse_type_fields(
+  tokens: List(Token),
+  acc: List(#(String, String)),
+) -> #(List(#(String, String)), List(Token)) {
+  case tokens {
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+
+    // Path A: Labeled field (e.g., `name: String`)
+    [lexer.Ident(field_name), lexer.Colon, ..rest] -> {
+      let #(type_str, after_type) = parse_type(rest)
+      consume_field_separator(after_type, [#(field_name, type_str), ..acc])
+    }
+
+    // Path B: Unlabeled field (e.g., `Int` or `Genre`)
+    _ -> {
+      let #(type_str, after_type) = parse_type(tokens)
+      // We pass an empty string "" as the label
+      consume_field_separator(after_type, [#("", type_str), ..acc])
+    }
+  }
+}
+
+// Helper to check for commas or the closing parenthesis
+fn consume_field_separator(
+  tokens: List(Token),
+  acc: List(#(String, String)),
+) -> #(List(#(String, String)), List(Token)) {
+  case tokens {
+    [lexer.Comma, ..rest] -> parse_type_fields(rest, acc)
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    _ -> panic as "Syntax Error: Expected ',' or ')' in type fields"
   }
 }

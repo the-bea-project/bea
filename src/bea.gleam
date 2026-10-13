@@ -26,6 +26,16 @@ pub fn main() {
       io.println("Transpiled project tree starting at " <> root_module)
     }
 
+    ["check", target] -> {
+      let _ = setup_project(target)
+      io.println("Checking project via Gleam...")
+      let result = shellout.command("gleam", ["check"], ".beabuild", [])
+      case result {
+        Ok(output) -> io.print(output)
+        Error(#(_code, err_msg)) -> io.println(err_msg)
+      }
+    }
+
     ["build", target] -> {
       let _ = setup_project(target)
       io.println("Building project via Gleam...")

@@ -14,7 +14,15 @@ def log_level(log_line: String) -> String {
   |> string.lowercase()
 }
 
+def reformat(log_line: String) -> String {
+  m = message(log_line)
+  l = log_level(log_line)
+
+  "#{m} (#{l})"
+}
+
 pub def main() {
   echo message("[WARNING]:  Disk almost full\r\n")
   echo log_level("[ERROR]: Invalid operation")
+  echo reformat("[INFO]: Operation completed")
 }
