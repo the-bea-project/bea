@@ -75,12 +75,25 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
 
     ast.ImportStmt(path) -> set.insert(imports, path)
 
+    // Auto-import gleam/result when the ? operator is used
+    ast.AssignStmt(_, ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
+    ast.ExprStmt(ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
+
     _ -> imports
   }
 }
 
 fn generate_statement(stmt: ast.Statement) -> String {
   case stmt {
+    // Module-level Constants
+    ast.ConstStmt(is_pub, name, value) -> {
+      let pub_prefix = case is_pub {
+        True -> "pub "
+        False -> ""
+      }
+      pub_prefix <> "const " <> name <> " = " <> generate_expression(value)
+    }
+
     // Custom Types (Structs and Enums)
     ast.CustomTypeStmt(is_pub, name, variants) -> {
       let pub_prefix = case is_pub {
@@ -161,21 +174,29 @@ fn generate_statement(stmt: ast.Statement) -> String {
     // 2. Gleam doesn't use the `return` keyword, so we just output the expression
     ast.ReturnStmt(expr) -> generate_expression(expr)
 
-    // 3. Map assignments to `let` or `let assert`
+    // 3a. Error Propagation Assignment (The ? Operator)
+    ast.AssignStmt(pattern_expr, ast.TryExpr(value_expr)) -> {
+      let pat_str = generate_pattern(pattern_expr)
+      let val_str = generate_expression(value_expr)
+      "use " <> pat_str <> " <- result.try(" <> val_str <> ")"
+    }
+
+    // 3b. Standard Assignment
     ast.AssignStmt(pattern_expr, value_expr) -> {
       let pat_str = generate_pattern(pattern_expr)
       let val_str = generate_expression(value_expr)
-
       case pattern_expr {
-        // Simple variables get standard `let`
         ast.IdentExpr(_) -> "let " <> pat_str <> " = " <> val_str
-
-        // Everything else (Lists, Tuples, etc.) gets `let assert`
         _ -> "let assert " <> pat_str <> " = " <> val_str
       }
     }
 
-    // 4. Standalone expressions
+    // 4a. Error Propagation Standalone Expression
+    ast.ExprStmt(ast.TryExpr(value_expr)) -> {
+      "use _ <- result.try(" <> generate_expression(value_expr) <> ")"
+    }
+
+    // 4b. Standard Standalone Expression
     ast.ExprStmt(expr) -> generate_expression(expr)
 
     // 5. Map `if/else` to a Gleam use construct
@@ -345,7 +366,16 @@ fn generate_pattern(expr: ast.Expr) -> String {
 
     // Allows destructuring variants with arguments, e.g., Walk(k)
     ast.CallExpr(name, args) -> {
-      let args_str = args |> list.map(generate_pattern) |> string.join(", ")
+      let args_str =
+        args
+        |> list.map(fn(arg) {
+          let #(label, expr) = arg
+          case label {
+            "" -> generate_pattern(expr)
+            lbl -> lbl <> ": " <> generate_pattern(expr)
+          }
+        })
+        |> string.join(", ")
       name <> "(" <> args_str <> ")"
     }
 
@@ -380,7 +410,16 @@ fn generate_expression(expr: ast.Expr) -> String {
     }
 
     ast.CallExpr(name, args) -> {
-      let args_str = args |> list.map(generate_expression) |> string.join(", ")
+      let args_str =
+        args
+        |> list.map(fn(arg) {
+          let #(label, expr) = arg
+          case label {
+            "" -> generate_expression(expr)
+            lbl -> lbl <> ": " <> generate_expression(expr)
+          }
+        })
+        |> string.join(", ")
       name <> "(" <> args_str <> ")"
     }
 
@@ -426,6 +465,36 @@ fn generate_expression(expr: ast.Expr) -> String {
         body |> list.map(generate_statement) |> string.join("\n      ")
       "fn(" <> params_str <> ") {\n      " <> body_str <> "\n    }"
     }
+
+    // Record Field Access
+    ast.RecordAccessExpr(base, field) -> {
+      generate_expression(base) <> "." <> field
+    }
+
+    // Struct update syntax (e.g., Team(team | coach: new_coach))
+    ast.RecordUpdateExpr(name, base, updates) -> {
+      let base_str = generate_expression(base)
+
+      case updates {
+        [] -> name <> "(.." <> base_str <> ")"
+        _ -> {
+          let updates_str =
+            updates
+            |> list.map(fn(arg) {
+              let #(label, expr) = arg
+              case label {
+                "" -> generate_expression(expr)
+                lbl -> lbl <> ": " <> generate_expression(expr)
+              }
+            })
+            |> string.join(", ")
+          name <> "(.." <> base_str <> ", " <> updates_str <> ")"
+        }
+      }
+    }
+
+    ast.TryExpr(_) ->
+      panic as "The ? operator can only be used directly on assignments or standalone statements in Bea"
   }
 }
 
@@ -449,9 +518,10 @@ fn generate_cond(clauses: List(ast.CondClause)) -> String {
   case clauses {
     [] -> "panic as \"No cond clause matched\""
     [ast.CondClause(cond_expr, body_expr), ..rest] -> {
-      // If they use `True ->`, just output the body natively!
+      // SYNTACTIC SUGAR: If they use `True ->` or `_ ->`, just output the body natively!
       case cond_expr {
-        ast.IdentExpr("True") -> generate_expression(body_expr)
+        ast.IdentExpr("True") | ast.IdentExpr("_") ->
+          generate_expression(body_expr)
         _ -> {
           let c = generate_expression(cond_expr)
           let b = generate_expression(body_expr)

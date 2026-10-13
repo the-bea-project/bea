@@ -19,10 +19,13 @@ pub fn parser_basic_function_test() {
   let tree = parser.parse(tokens)
 
   let expected_body = [
-    // UPDATED: AssignStmt now takes an ast.IdentExpr instead of a String
     ast.AssignStmt(ast.IdentExpr("status"), ast.StringExpr("active")),
     ast.ExprStmt(
-      ast.CallExpr("notify", [ast.IdentExpr("user_id"), ast.IdentExpr("status")]),
+      ast.CallExpr("notify", [
+        // UPDATED: Arguments are now tuples with empty labels
+        #("", ast.IdentExpr("user_id")),
+        #("", ast.IdentExpr("status")),
+      ]),
     ),
     ast.ReturnStmt(ast.BinaryExpr(ast.IntExpr(40), "+", ast.IntExpr(2))),
   ]

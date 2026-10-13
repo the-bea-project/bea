@@ -13,7 +13,7 @@ pub type Expr {
   StringExpr(String)
   IdentExpr(String)
   // Function calls
-  CallExpr(name: String, args: List(Expr))
+  CallExpr(name: String, args: List(#(String, Expr)))
   // Binary operations (e.g., left + right)
   BinaryExpr(left: Expr, op: String, right: Expr)
   // A list of expressions, e.g., [1, 2, 3]
@@ -33,6 +33,16 @@ pub type Expr {
   TupleIndexExpr(tuple: Expr, index: Int)
   // Anon functions `fn(x) {...}`
   AnonFnExpr(params: List(Expr), body: List(Statement))
+  // `?` operator
+  TryExpr(Expr)
+  // Record update syntax, e.g., Team(team | coach: new_coach)
+  RecordUpdateExpr(
+    constructor: String,
+    base: Expr,
+    updates: List(#(String, Expr)),
+  )
+  // Record field access (e.g., team.coach.name)
+  RecordAccessExpr(base: Expr, field: String)
 }
 
 pub type Clause {
@@ -75,6 +85,9 @@ pub type Statement {
 
   // Custom Types (Structs and Enums)
   CustomTypeStmt(is_pub: Bool, name: String, variants: List(TypeVariant))
+
+  // Module-level constants
+  ConstStmt(is_pub: Bool, name: String, value: Expr)
 }
 
 // A full Bea program is just a list of top-level statements

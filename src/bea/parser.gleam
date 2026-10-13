@@ -43,6 +43,20 @@ fn parse_statements(
       parse_custom_type(False, name, rest, acc)
     }
 
+    // Handle `pub const`
+    [lexer.Pub, lexer.Const, lexer.Ident(name), lexer.Eq, ..rest] -> {
+      let #(val_expr, after_val) = parse_expression(rest)
+      let stmt = ast.ConstStmt(True, name, val_expr)
+      parse_statements(after_val, [stmt, ..acc])
+    }
+
+    // Handle private `const`
+    [lexer.Const, lexer.Ident(name), lexer.Eq, ..rest] -> {
+      let #(val_expr, after_val) = parse_expression(rest)
+      let stmt = ast.ConstStmt(False, name, val_expr)
+      parse_statements(after_val, [stmt, ..acc])
+    }
+
     [_, ..rest] -> parse_statements(rest, acc)
   }
 }
@@ -130,10 +144,35 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       #(ast.CallExpr(name, args), after_args)
     }
 
-    // Constructor calls (e.g., Ok(42) or User("Alice"))
+    // Constructor calls AND Record Updates
     [lexer.TypeIdent(name), lexer.LParen, ..rest] -> {
-      let #(args, after_args) = parse_args(rest, [])
-      #(ast.CallExpr(name, args), after_args)
+      case rest {
+        // Empty constructor: e.g., Chill()
+        [lexer.RParen, ..after_parens] -> #(
+          ast.CallExpr(name, []),
+          after_parens,
+        )
+
+        _ -> {
+          // Tentatively parse the first element to see if a Pipe follows
+          let #(first_expr, after_first) = parse_expression(rest)
+
+          case after_first {
+            // Path A: It's an Elixir-style record update! e.g., Team(team | coach:)
+            [lexer.Pipe, ..rest2] -> {
+              let #(updates, after_updates) = parse_args(rest2, [])
+              #(ast.RecordUpdateExpr(name, first_expr, updates), after_updates)
+            }
+
+            // Path B: Standard constructor call. 
+            // We backtrack by passing the original `rest` so parse_args handles labels!
+            _ -> {
+              let #(args, after_args) = parse_args(rest, [])
+              #(ast.CallExpr(name, args), after_args)
+            }
+          }
+        }
+      }
     }
 
     // Intercept Lists
@@ -200,6 +239,16 @@ fn continue_expression(
     // Tuple Indexing (e.g., coords.0 or get_tuple().1)
     [lexer.Dot, lexer.IntLit(idx), ..rest] -> {
       continue_expression(ast.TupleIndexExpr(left, idx), rest)
+    }
+
+    // Record Field Access (e.g., team.coach or team.coach.name)
+    [lexer.Dot, lexer.Ident(field), ..rest] -> {
+      continue_expression(ast.RecordAccessExpr(left, field), rest)
+    }
+
+    // The `?` Try Operator
+    [lexer.Question, ..rest] -> {
+      continue_expression(ast.TryExpr(left), rest)
     }
 
     // SYNTACTIC SUGAR: Wraps the ENTIRE left-hand pipeline inside the echo!
@@ -317,24 +366,44 @@ fn parse_block(
 
 fn parse_args(
   tokens: List(Token),
-  acc: List(ast.Expr),
-) -> #(List(ast.Expr), List(Token)) {
+  acc: List(#(String, ast.Expr)),
+) -> #(List(#(String, ast.Expr)), List(Token)) {
   case tokens {
-    // Hit the closing parenthesis
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
 
-    // Otherwise, parse the next expression
+    // 1. Shorthand label with a comma: `Coach(name:, ...)`
+    [lexer.Ident(label), lexer.Colon, lexer.Comma, ..rest] -> {
+      parse_args(rest, [#(label, ast.IdentExpr(label)), ..acc])
+    }
+
+    // 2. Shorthand label closing the call: `Coach(name:)`
+    [lexer.Ident(label), lexer.Colon, lexer.RParen, ..rest] -> {
+      #(list.reverse([#(label, ast.IdentExpr(label)), ..acc]), rest)
+    }
+
+    // 3. Explicit label: `name: "Alice"`
+    [lexer.Ident(label), lexer.Colon, ..rest] -> {
+      let #(expr, after_expr) = parse_expression(rest)
+      consume_arg_separator(after_expr, [#(label, expr), ..acc])
+    }
+
+    // 4. Standard unlabeled argument: `"Alice"`
     _ -> {
       let #(expr, after_expr) = parse_expression(tokens)
-
-      case after_expr {
-        // If there's a comma, consume it and keep parsing arguments
-        [lexer.Comma, ..rest] -> parse_args(rest, [expr, ..acc])
-        // If there's a closing parenthesis, consume it and finish
-        [lexer.RParen, ..rest] -> #(list.reverse([expr, ..acc]), rest)
-        _ -> panic as "Syntax Error: Expected ',' or ')' in function arguments"
-      }
+      consume_arg_separator(after_expr, [#("", expr), ..acc])
     }
+  }
+}
+
+// Helper to look for commas or closing parentheses between arguments
+fn consume_arg_separator(
+  tokens: List(Token),
+  acc: List(#(String, ast.Expr)),
+) -> #(List(#(String, ast.Expr)), List(Token)) {
+  case tokens {
+    [lexer.Comma, ..rest] -> parse_args(rest, acc)
+    [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    _ -> panic as "Syntax Error: Expected ',' or ')' in function arguments"
   }
 }
 
