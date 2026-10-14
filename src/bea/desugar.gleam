@@ -5,8 +5,16 @@ import gleam/int
 import gleam/list
 
 pub fn process(program: ast.Program) -> ast.Program {
-  let #(_final_counter, new_stmts) = hoist_statements(program.statements, 0)
-  ast.Program(new_stmts)
+  let #(final_counter, new_stmts) = hoist_statements(program.statements, 0)
+
+  // If the counter is > 0, we used the ? operator! 
+  // Inject the import so the codegen automatically picks it up.
+  let final_stmts = case final_counter > 0 {
+    True -> [ast.ImportStmt("gleam/result"), ..new_stmts]
+    False -> new_stmts
+  }
+
+  ast.Program(final_stmts)
 }
 
 // Folds over a list of statements, threading the counter, and flattens the result
@@ -24,11 +32,11 @@ fn hoist_statement(
   stmt: ast.Statement,
 ) -> #(Int, List(ast.Statement)) {
   case stmt {
-    // OPTIMIZATION: If TryExpr is ALREADY a top-level assignment, we don't need to hoist it!
     ast.AssignStmt(pat, ast.TryExpr(inner)) -> {
       let #(c1, hoisted, new_inner) = hoist_expr(inner, counter)
       let final_stmt = ast.AssignStmt(pat, ast.TryExpr(new_inner))
-      #(c1, list.append(hoisted, [final_stmt]))
+      // Track that we used the ? operator!
+      #(c1 + 1, list.append(hoisted, [final_stmt]))
     }
 
     // Standard Assignment: Check if the value has nested TryExprs
@@ -43,7 +51,11 @@ fn hoist_statement(
       case expr {
         ast.TryExpr(inner) -> {
           let #(c1, hoisted, new_inner) = hoist_expr(inner, counter)
-          #(c1, list.append(hoisted, [ast.ExprStmt(ast.TryExpr(new_inner))]))
+          // Track that we used the ? operator!
+          #(
+            c1 + 1,
+            list.append(hoisted, [ast.ExprStmt(ast.TryExpr(new_inner))]),
+          )
         }
         _ -> {
           let #(c1, hoisted, new_expr) = hoist_expr(expr, counter)

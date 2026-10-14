@@ -1,7 +1,0 @@
-pub def greet(name) {
-  "Hello #{name}!"
-}
-
-pub def greet2(s1, s2) {
-  "Hi" <> s1 <> s2 <> "!"
-}

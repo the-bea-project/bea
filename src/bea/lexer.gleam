@@ -196,7 +196,6 @@ fn consume_string(
       scan(rest, [wrapper(acc), ..tokens])
     }
 
-    // NEW: Found interpolation start `#{` inside a double-quoted string
     ["#", "{", ..rest] if delimiter == "\"" -> {
       // 1. Extract the characters of the expression inside #{ }
       let #(inner_chars, after_brace) = extract_until_brace(rest, 0, [])

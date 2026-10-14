@@ -17,7 +17,7 @@ pub fn end_to_end_transpiler_test() {
   "
 
   let expected =
-    "import gleam/bool\n\npub fn process(user_id) {\n  let status = \"active\"\n  use <- bool.guard(when: status, return: 40 + 2)\n}"
+    "import gleam/bool\n\npub fn process(user_id) {\n  let status = \"active\"\n  use <- bool.guard(when: status, return: {40 + 2})\n}"
 
   source
   |> lexer.tokenize()

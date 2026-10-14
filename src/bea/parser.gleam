@@ -676,6 +676,21 @@ fn parse_tuple_or_group(
 
 fn parse_type(tokens: List(Token)) -> #(String, List(Token)) {
   case tokens {
+    // Function Types! e.g., fn(Int, String) -> Bool
+    [lexer.Fn, lexer.LParen, ..rest] -> {
+      // 1. Parse the parameter types (e.g. Int, String)
+      let #(args, after_args) = parse_type_args(rest, [])
+
+      // 2. Expect the arrow ->
+      let assert [lexer.Arrow, ..after_arrow] = after_args
+
+      // 3. Parse the return type
+      let #(ret_type, after_ret) = parse_type(after_arrow)
+
+      // 4. Stitch it together into a raw Gleam type string
+      #("fn(" <> string.join(args, ", ") <> ") -> " <> ret_type, after_ret)
+    }
+
     // e.g. List(Int) or Result(String, Error)
     [lexer.TypeIdent(name), lexer.LParen, ..rest] -> {
       let #(args, after_args) = parse_type_args(rest, [])
@@ -704,7 +719,15 @@ fn parse_type_args(
   case tokens {
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
     _ -> {
-      let #(t, after_t) = parse_type(tokens)
+      // INTERCEPTOR: If there is a label (e.g., `x: Int`), skip the `x:`!
+      let tokens_to_parse = case tokens {
+        [lexer.Ident(_label), lexer.Colon, ..rest_after_label] ->
+          rest_after_label
+        _ -> tokens
+      }
+
+      // Parse the actual type (Int)
+      let #(t, after_t) = parse_type(tokens_to_parse)
 
       case after_t {
         [lexer.Comma, ..rest] -> parse_type_args(rest, [t, ..acc])
