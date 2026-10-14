@@ -539,8 +539,23 @@ fn parse_import_path(
   acc: String,
 ) -> #(String, List(Token)) {
   case tokens {
+    // Standard path parts
     [lexer.Ident(name), ..rest] -> parse_import_path(rest, acc <> name)
     [lexer.Slash, ..rest] -> parse_import_path(rest, acc <> "/")
+
+    // Unqualified import blocks: .{type Order, Eq}
+    [lexer.Dot, ..rest] -> parse_import_path(rest, acc <> ".")
+    [lexer.LBrace, ..rest] -> parse_import_path(rest, acc <> "{")
+    [lexer.RBrace, ..rest] -> parse_import_path(rest, acc <> "}")
+    [lexer.Comma, ..rest] -> parse_import_path(rest, acc <> ", ")
+
+    // The `type` keyword inside the braces
+    [lexer.Type, ..rest] -> parse_import_path(rest, acc <> "type ")
+
+    // Capitalized types (like Order, Some, None) inside the braces
+    [lexer.TypeIdent(name), ..rest] -> parse_import_path(rest, acc <> name)
+
+    // Stop parsing when we hit anything else (like a `def` or `pub`)
     _ -> #(acc, tokens)
   }
 }
