@@ -414,11 +414,15 @@ fn generate_expression(expr: ast.Expr) -> String {
         "or" -> "||"
         other -> other
       }
-      generate_expression(left)
+
+      // Gleam uses { } for grouping precedence, NOT ( )!
+      "{"
+      <> generate_expression(left)
       <> " "
       <> gleam_op
       <> " "
       <> generate_expression(right)
+      <> "}"
     }
 
     ast.CallExpr(name, args) -> {
@@ -471,6 +475,21 @@ fn generate_expression(expr: ast.Expr) -> String {
       generate_expression(tuple) <> "." <> int.to_string(idx)
     }
 
+    ast.MapExpr(pairs) -> {
+      let pairs_str =
+        pairs
+        |> list.map(fn(p) {
+          let #(k, v) = p
+          "#("
+          <> generate_expression(k)
+          <> ", "
+          <> generate_expression(v)
+          <> ")"
+        })
+        |> string.join(", ")
+      "dict.from_list([" <> pairs_str <> "])"
+    }
+
     ast.AnonFnExpr(params, body) -> {
       let params_str = params |> list.map(generate_pattern) |> string.join(", ")
       let body_str =
@@ -505,8 +524,18 @@ fn generate_expression(expr: ast.Expr) -> String {
       }
     }
 
+    ast.BlockExpr(stmts) -> {
+      let stmts_str =
+        stmts |> list.map(generate_statement) |> string.join("\n      ")
+      "{\n      " <> stmts_str <> "\n    }"
+    }
+
     ast.TryExpr(_) ->
       panic as "The ? operator can only be used directly on assignments or standalone statements in Bea"
+
+    ast.PanicExpr -> "panic"
+
+    ast.PanicAsExpr(msg) -> "panic as " <> generate_expression(msg)
   }
 }
 

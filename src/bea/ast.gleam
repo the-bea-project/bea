@@ -45,6 +45,14 @@ pub type Expr {
   RecordAccessExpr(base: Expr, field: String)
   // Pattern aliasing: e.g., [head | _] as list
   AliasExpr(pattern: Expr, name: String)
+  // Map / Dictionary literals: %{ key: val }
+  MapExpr(pairs: List(#(Expr, Expr)))
+  // A block of statements that evaluates to its last expression
+  BlockExpr(statements: List(Statement))
+  // A simple panic
+  PanicExpr
+  // A panic with a custom message expression
+  PanicAsExpr(Expr)
 }
 
 pub type Clause {

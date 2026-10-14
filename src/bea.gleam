@@ -3,6 +3,7 @@
 import argv
 import bea/ast
 import bea/codegen
+import bea/desugar
 import bea/lexer
 import bea/parser
 import gleam/io
@@ -130,14 +131,18 @@ fn crawl_and_transpile(
                 Error(_) -> panic as { "Could not find module: " <> filepath }
               }
 
+              // Lex and Parse
               let parsed_ast =
                 source
                 |> lexer.tokenize()
                 |> parser.parse()
 
+              // Run the Desugaring Pass
+              let desugared_ast = desugar.process(parsed_ast)
+
               // Filter imports to queue local (.bea or .gleam) dependencies
               let local_imports =
-                parsed_ast
+                desugared_ast
                 |> extract_imports_from_ast()
                 |> list.filter(fn(imp) {
                   case resolve_import(imp, base_dir) {
@@ -148,7 +153,7 @@ fn crawl_and_transpile(
 
               let new_queue = list.append(rest, local_imports)
 
-              let gleam_code = codegen.generate(parsed_ast)
+              let gleam_code = codegen.generate(desugared_ast)
 
               let out_path = out_dir <> "/" <> module <> ".gleam"
               let out_folder =

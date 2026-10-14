@@ -113,6 +113,29 @@ fn collapse_clauses(statements: List(ast.Statement)) -> List(ast.Statement) {
   }
 }
 
+// Parses a primary expression AND any tightly bound postfix operators (like ? or .)
+fn parse_operand(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
+  let #(expr, rest) = parse_primary(tokens)
+  continue_postfix(expr, rest)
+}
+
+// Loops to catch consecutive postfix operators (e.g., user.team.id?)
+fn continue_postfix(
+  left: ast.Expr,
+  tokens: List(Token),
+) -> #(ast.Expr, List(Token)) {
+  case tokens {
+    [lexer.Dot, lexer.IntLit(idx), ..rest] ->
+      continue_postfix(ast.TupleIndexExpr(left, idx), rest)
+    [lexer.Dot, lexer.Ident(field), ..rest] ->
+      continue_postfix(ast.RecordAccessExpr(left, field), rest)
+    [lexer.Ident("as"), lexer.Ident(alias_name), ..rest] ->
+      continue_postfix(ast.AliasExpr(left, alias_name), rest)
+    [lexer.Question, ..rest] -> continue_postfix(ast.TryExpr(left), rest)
+    _ -> #(left, tokens)
+  }
+}
+
 fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
   case tokens {
     [lexer.IntLit(val), ..rest] -> #(ast.IntExpr(val), rest)
@@ -191,6 +214,18 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
       }
     }
 
+    // Catch-all block expressions! { ... }
+    [lexer.LBrace, ..rest] -> {
+      let #(stmts, after_block) = parse_block(rest, [])
+      #(ast.BlockExpr(stmts), after_block)
+    }
+
+    // Map Literals: %{ key: value }
+    [lexer.Percent, lexer.LBrace, ..rest] -> {
+      let #(pairs, after_brace) = parse_map_pairs(rest, [])
+      #(ast.MapExpr(pairs), after_brace)
+    }
+
     // For module calls like `io.println()`
     [lexer.Ident(module), lexer.Dot, lexer.Ident(name), lexer.LParen, ..rest] -> {
       let #(args, after_args) = parse_args(rest, [])
@@ -221,12 +256,23 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     // Standalone constructors (e.g., True, False)
     [lexer.TypeIdent(name), ..rest] -> #(ast.IdentExpr(name), rest)
 
+    // Catch `panic as "Message"`
+    [lexer.Panic, lexer.As, ..rest] -> {
+      let #(msg_expr, after_msg) = parse_expression(rest)
+      #(ast.PanicAsExpr(msg_expr), after_msg)
+    }
+
+    // Catch standard `panic`
+    [lexer.Panic, ..rest] -> {
+      #(ast.PanicExpr, rest)
+    }
+
     _ -> panic as "Syntax Error: Expected an expression"
   }
 }
 
 fn parse_expression(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
-  let #(left, after_left) = parse_primary(tokens)
+  let #(left, after_left) = parse_operand(tokens)
   continue_expression(left, after_left)
 }
 
@@ -260,76 +306,77 @@ fn continue_expression(
       continue_expression(ast.EchoExpr(left), rest)
     }
 
+    // Use parse_operand(rest)
     [lexer.PipeRight, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "|>", right), after_right)
     }
     [lexer.Plus, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "+", right), after_right)
     }
     [lexer.Minus, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "-", right), after_right)
     }
     [lexer.Star, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "*", right), after_right)
     }
     [lexer.Slash, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "/", right), after_right)
     }
     [lexer.PlusDot, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "+.", right), after_right)
     }
     [lexer.MinusDot, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "-.", right), after_right)
     }
     [lexer.StarDot, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "*.", right), after_right)
     }
     [lexer.SlashDot, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "/.", right), after_right)
     }
     [lexer.Greater, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, ">", right), after_right)
     }
     [lexer.GreaterEq, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, ">=", right), after_right)
     }
     [lexer.Less, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "<", right), after_right)
     }
     [lexer.LessEq, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "<=", right), after_right)
     }
     [lexer.EqEq, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "==", right), after_right)
     }
     [lexer.BangEq, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "!=", right), after_right)
     }
     [lexer.Concat, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "<>", right), after_right)
     }
     [lexer.And, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "and", right), after_right)
     }
     [lexer.Or, ..rest] -> {
-      let #(right, after_right) = parse_primary(rest)
+      let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "or", right), after_right)
     }
 
@@ -732,5 +779,36 @@ fn consume_field_separator(
     [lexer.Comma, ..rest] -> parse_type_fields(rest, acc)
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
     _ -> panic as "Syntax Error: Expected ',' or ')' in type fields"
+  }
+}
+
+fn parse_map_pairs(
+  tokens: List(Token),
+  acc: List(#(ast.Expr, ast.Expr)),
+) -> #(List(#(ast.Expr, ast.Expr)), List(Token)) {
+  case tokens {
+    // Empty map %{} or end of map
+    [lexer.RBrace, ..rest] -> #(list.reverse(acc), rest)
+    _ -> {
+      // 1. Parse the key
+      let #(key_expr, after_key) = parse_expression(tokens)
+
+      // 2. Expect the colon instead of fat arrow!
+      let assert [lexer.Colon, ..after_colon] = after_key
+
+      // 3. Parse the value
+      let #(val_expr, after_val) = parse_expression(after_colon)
+
+      // 4. Look for a comma or the closing brace
+      case after_val {
+        [lexer.Comma, ..rest] ->
+          parse_map_pairs(rest, [#(key_expr, val_expr), ..acc])
+        [lexer.RBrace, ..rest] -> #(
+          list.reverse([#(key_expr, val_expr), ..acc]),
+          rest,
+        )
+        _ -> panic as "Syntax Error: Expected ',' or '}' in map literal"
+      }
+    }
   }
 }
