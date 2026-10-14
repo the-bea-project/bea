@@ -18,7 +18,10 @@ pub fn generate(program: ast.Program) -> String {
     |> list.map(fn(mod) { "import " <> mod })
     |> string.join("\n")
 
-  // 2. Generate the main body code
+  // 2. Identify all single-variant custom types (irrefutable records)
+  let single_variants = collect_single_variants(statements)
+
+  // 3. Generate the main body code
   let body_str =
     statements
     |> list.filter(fn(s) {
@@ -27,17 +30,71 @@ pub fn generate(program: ast.Program) -> String {
         _ -> True
       }
     })
-    |> list.map(generate_statement)
+    |> list.map(fn(s) { generate_statement(s, single_variants) })
     |> string.join("\n\n")
 
-  // 3. Stitch them together
+  // 4. Stitch them together
   case imports_str {
     "" -> body_str
     _ -> imports_str <> "\n\n" <> body_str
   }
 }
 
-// Recursively walks a list of statements
+// Scans statements for custom types that have exactly one variant constructor
+fn collect_single_variants(statements: List(ast.Statement)) -> Set(String) {
+  list.fold(statements, set.new(), fn(acc, stmt) {
+    case stmt {
+      ast.CustomTypeStmt(_is_pub, _name, [ast.TypeVariant(variant_name, _)]) ->
+        set.insert(acc, variant_name)
+      _ -> acc
+    }
+  })
+}
+
+// Determines if a pattern is guaranteed to match without runtime assertions
+fn is_irrefutable_pattern(
+  expr: ast.Expr,
+  single_variants: Set(String),
+) -> Bool {
+  case expr {
+    // Variable binding or discard (e.g. `x`, `_`, `user_id`)
+    ast.IdentExpr(name) -> {
+      let first = string.slice(name, 0, 1)
+      case first == string.lowercase(first) {
+        True -> True
+        False -> set.contains(single_variants, name)
+      }
+    }
+
+    // Typed pattern (e.g. `x: Int`)
+    ast.TypedExpr(inner, _) -> is_irrefutable_pattern(inner, single_variants)
+
+    // Alias pattern (e.g. `pattern as name`)
+    ast.AliasExpr(pattern, _) ->
+      is_irrefutable_pattern(pattern, single_variants)
+
+    // Tuple pattern: irrefutable if every sub-element is irrefutable
+    ast.TupleExpr(elements) ->
+      list.all(elements, fn(el) { is_irrefutable_pattern(el, single_variants) })
+
+    // Constructor pattern: irrefutable if it has only one variant and all args are irrefutable
+    ast.CallExpr(name, args) -> {
+      case set.contains(single_variants, name) {
+        True ->
+          list.all(args, fn(arg) {
+            let #(_label, val) = arg
+            is_irrefutable_pattern(val, single_variants)
+          })
+        False -> False
+      }
+    }
+
+    // Literals, lists, and multi-variant constructors are refutable
+    _ -> False
+  }
+}
+
+// Recursively walks a list of statements to collect required imports
 fn collect_imports(
   statements: List(ast.Statement),
   imports: Set(String),
@@ -51,10 +108,8 @@ fn collect_imports(
   }
 }
 
-// Checks specific AST nodes for features that require Gleam standard libraries
 fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
   case stmt {
-    // extra '_' here so there are 4 arguments total
     ast.DefStmt(_, _, _, clauses) ->
       list.fold(clauses, imports, fn(acc, clause) {
         collect_imports(clause.body, acc)
@@ -67,15 +122,12 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
         |> collect_imports(else_body, _)
 
       case body {
-        // Trigger bool.guard anytime the body is a single return
         [ast.ReturnStmt(_)] -> set.insert(base_imports, "gleam/bool")
         _ -> base_imports
       }
     }
 
     ast.ImportStmt(path) -> set.insert(imports, path)
-
-    // Auto-import gleam/result when the ? operator is used
     ast.AssignStmt(_, ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
     ast.ExprStmt(ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
 
@@ -83,7 +135,10 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
   }
 }
 
-fn generate_statement(stmt: ast.Statement) -> String {
+fn generate_statement(
+  stmt: ast.Statement,
+  single_variants: Set(String),
+) -> String {
   case stmt {
     // Module-level Constants
     ast.ConstStmt(is_pub, name, value) -> {
@@ -91,7 +146,11 @@ fn generate_statement(stmt: ast.Statement) -> String {
         True -> "pub "
         False -> ""
       }
-      pub_prefix <> "const " <> name <> " = " <> generate_expression(value)
+      pub_prefix
+      <> "const "
+      <> name
+      <> " = "
+      <> generate_expression(value, single_variants)
     }
 
     // Custom Types (Structs and Enums)
@@ -114,9 +173,7 @@ fn generate_statement(stmt: ast.Statement) -> String {
                   let #(f_name, f_type) = f
                   case f_name {
                     "" -> f_type
-                    // Unlabeled: just output the type (e.g., "Int")
                     _ -> f_name <> ": " <> f_type
-                    // Labeled: output "name: String"
                   }
                 })
                 |> string.join(", ")
@@ -129,28 +186,28 @@ fn generate_statement(stmt: ast.Statement) -> String {
       pub_prefix <> "type " <> name <> " {\n  " <> variants_str <> "\n}"
     }
 
-    // ADDED return_type here
+    // Function Definitions
     ast.DefStmt(is_pub, name, return_type, clauses) -> {
       let pub_prefix = case is_pub {
         True -> "pub "
         False -> ""
       }
 
-      // Build the return string
       let ret_str = case return_type {
         "" -> ""
         t -> " -> " <> t
       }
 
       case clauses {
-        // Only simple single-clauses WITHOUT guards stay as standard functions
         [ast.Clause(params, [], body)] -> {
           case is_simple_params(params) {
             True -> {
               let params_str =
                 params |> list.map(generate_pattern) |> string.join(", ")
               let body_str =
-                body |> list.map(generate_statement) |> string.join("\n  ")
+                body
+                |> list.map(fn(s) { generate_statement(s, single_variants) })
+                |> string.join("\n  ")
               pub_prefix
               <> "fn "
               <> name
@@ -162,49 +219,64 @@ fn generate_statement(stmt: ast.Statement) -> String {
               <> body_str
               <> "\n}"
             }
-            False -> generate_multi_clause(is_pub, name, return_type, clauses)
+            False ->
+              generate_multi_clause(
+                is_pub,
+                name,
+                return_type,
+                clauses,
+                single_variants,
+              )
           }
         }
-        _ -> generate_multi_clause(is_pub, name, return_type, clauses)
+        _ ->
+          generate_multi_clause(
+            is_pub,
+            name,
+            return_type,
+            clauses,
+            single_variants,
+          )
       }
     }
 
-    // 2. Gleam doesn't use the `return` keyword, so we just output the expression
-    ast.ReturnStmt(expr) -> generate_expression(expr)
+    // Return statement
+    ast.ReturnStmt(expr) -> generate_expression(expr, single_variants)
 
-    // 3a. Error Propagation Assignment (The ? Operator)
+    // Error Propagation Assignment (The ? Operator)
     ast.AssignStmt(pattern_expr, ast.TryExpr(value_expr)) -> {
       let pat_str = generate_pattern(pattern_expr)
-      let val_str = generate_expression(value_expr)
+      let val_str = generate_expression(value_expr, single_variants)
       "use " <> pat_str <> " <- result.try(" <> val_str <> ")"
     }
 
-    // 3b. Standard Assignment
+    // Optimized Assignment: Emits `let` if irrefutable, otherwise `let assert`
     ast.AssignStmt(pattern_expr, value_expr) -> {
       let pat_str = generate_pattern(pattern_expr)
-      let val_str = generate_expression(value_expr)
-      case pattern_expr {
-        ast.IdentExpr(_) -> "let " <> pat_str <> " = " <> val_str
-        _ -> "let assert " <> pat_str <> " = " <> val_str
+      let val_str = generate_expression(value_expr, single_variants)
+      case is_irrefutable_pattern(pattern_expr, single_variants) {
+        True -> "let " <> pat_str <> " = " <> val_str
+        False -> "let assert " <> pat_str <> " = " <> val_str
       }
     }
 
-    // 4a. Error Propagation Standalone Expression
+    // Error Propagation Standalone Expression
     ast.ExprStmt(ast.TryExpr(value_expr)) -> {
-      "use _ <- result.try(" <> generate_expression(value_expr) <> ")"
+      "use _ <- result.try("
+      <> generate_expression(value_expr, single_variants)
+      <> ")"
     }
 
-    // 4b. Standard Standalone Expression
-    ast.ExprStmt(expr) -> generate_expression(expr)
+    // Standard Standalone Expression
+    ast.ExprStmt(expr) -> generate_expression(expr, single_variants)
 
-    // 5. Map `if/else` to a Gleam use construct
+    // If / Else Statements
     ast.IfStmt(condition, body, else_body) -> {
-      let cond_str = generate_expression(condition)
+      let cond_str = generate_expression(condition, single_variants)
 
       case body {
-        // 1. If the body is JUST an early return, use bool.guard
         [ast.ReturnStmt(ret_expr)] -> {
-          let ret_str = generate_expression(ret_expr)
+          let ret_str = generate_expression(ret_expr, single_variants)
           let guard_str =
             "use <- bool.guard(when: "
             <> cond_str
@@ -214,21 +286,21 @@ fn generate_statement(stmt: ast.Statement) -> String {
 
           case else_body {
             [] -> guard_str
-            // 2. If there is an else block, flatten it to run AFTER the guard!
             _ -> {
               let else_str =
                 else_body
-                |> list.map(generate_statement)
+                |> list.map(fn(s) { generate_statement(s, single_variants) })
                 |> string.join("\n  ")
               guard_str <> "\n  " <> else_str
             }
           }
         }
 
-        // 3. Standard If/Else logic for multi-line bodies
         _ -> {
           let body_str =
-            body |> list.map(generate_statement) |> string.join("\n      ")
+            body
+            |> list.map(fn(s) { generate_statement(s, single_variants) })
+            |> string.join("\n      ")
 
           case else_body {
             [] ->
@@ -240,7 +312,7 @@ fn generate_statement(stmt: ast.Statement) -> String {
             _ -> {
               let else_str =
                 else_body
-                |> list.map(generate_statement)
+                |> list.map(fn(s) { generate_statement(s, single_variants) })
                 |> string.join("\n      ")
               "case "
               <> cond_str
@@ -264,6 +336,7 @@ fn generate_multi_clause(
   name: String,
   return_type: String,
   clauses: List(ast.Clause),
+  single_variants: Set(String),
 ) -> String {
   let pub_prefix = case is_pub {
     True -> "pub "
@@ -277,10 +350,8 @@ fn generate_multi_clause(
   let first_clause =
     list.first(clauses) |> result.unwrap(ast.Clause([], [], []))
   let arity = list.length(first_clause.params)
-
   let args = make_synthetic_params(0, arity, [])
 
-  // 1. Attach types from the Function Head to our generated arguments
   let typed_args =
     list.zip(args, first_clause.params)
     |> list.map(fn(pair) {
@@ -292,15 +363,12 @@ fn generate_multi_clause(
     })
 
   let params_def = string.join(typed_args, ", ")
-
   let match_target = string.join(args, ", ")
-
-  // 2. Filter out the Function Head so we don't generate an empty case block
   let valid_clauses = list.filter(clauses, fn(c) { c.body != [] })
 
   let cases_str =
     valid_clauses
-    |> list.map(generate_clause_arm)
+    |> list.map(fn(c) { generate_clause_arm(c, single_variants) })
     |> string.join("\n    ")
 
   pub_prefix
@@ -317,7 +385,6 @@ fn generate_multi_clause(
   <> "\n  }\n}"
 }
 
-// Helpers for multi-clause codegen
 fn is_simple_params(params: List(ast.Expr)) -> Bool {
   list.all(params, fn(p) {
     case p {
@@ -328,18 +395,23 @@ fn is_simple_params(params: List(ast.Expr)) -> Bool {
   })
 }
 
-fn generate_clause_arm(clause: ast.Clause) -> String {
+fn generate_clause_arm(
+  clause: ast.Clause,
+  single_variants: Set(String),
+) -> String {
   let ast.Clause(params, guard, body) = clause
-
   let pattern_str = params |> list.map(generate_pattern) |> string.join(", ")
 
   let guard_str = case guard {
     [] -> ""
-    [g] -> " if " <> generate_expression(g)
+    [g] -> " if " <> generate_expression(g, single_variants)
     _ -> ""
   }
 
-  let body_str = body |> list.map(generate_statement) |> string.join("\n      ")
+  let body_str =
+    body
+    |> list.map(fn(s) { generate_statement(s, single_variants) })
+    |> string.join("\n      ")
 
   pattern_str <> guard_str <> " -> {\n      " <> body_str <> "\n    }"
 }
@@ -372,7 +444,6 @@ fn generate_pattern(expr: ast.Expr) -> String {
       "#(" <> elements_str <> ")"
     }
 
-    // Allows destructuring variants with arguments, e.g., Walk(k)
     ast.CallExpr(name, args) -> {
       let args_str =
         args
@@ -391,7 +462,7 @@ fn generate_pattern(expr: ast.Expr) -> String {
   }
 }
 
-fn generate_expression(expr: ast.Expr) -> String {
+fn generate_expression(expr: ast.Expr, single_variants: Set(String)) -> String {
   case expr {
     ast.IntExpr(val) -> int.to_string(val)
     ast.FloatExpr(val) -> float.to_string(val)
@@ -399,14 +470,15 @@ fn generate_expression(expr: ast.Expr) -> String {
     ast.IdentExpr(name) -> name
 
     ast.AliasExpr(pattern, name) -> {
-      generate_expression(pattern) <> " as " <> name
+      generate_expression(pattern, single_variants) <> " as " <> name
     }
 
-    ast.UnaryExpr("not", inner) -> "!" <> generate_expression(inner)
+    ast.UnaryExpr("not", inner) ->
+      "!" <> generate_expression(inner, single_variants)
     ast.UnaryExpr(op, _) -> panic as { "Unsupported unary operator: " <> op }
 
     ast.TypedExpr(inner, type_name) ->
-      generate_expression(inner) <> ": " <> type_name
+      generate_expression(inner, single_variants) <> ": " <> type_name
 
     ast.BinaryExpr(left, op, right) -> {
       let gleam_op = case op {
@@ -415,13 +487,12 @@ fn generate_expression(expr: ast.Expr) -> String {
         other -> other
       }
 
-      // Gleam uses { } for grouping precedence, NOT ( )!
       "{"
-      <> generate_expression(left)
+      <> generate_expression(left, single_variants)
       <> " "
       <> gleam_op
       <> " "
-      <> generate_expression(right)
+      <> generate_expression(right, single_variants)
       <> "}"
     }
 
@@ -429,50 +500,56 @@ fn generate_expression(expr: ast.Expr) -> String {
       let args_str =
         args
         |> list.map(fn(arg) {
-          let #(label, expr) = arg
+          let #(label, e) = arg
           case label {
-            "" -> generate_expression(expr)
-            lbl -> lbl <> ": " <> generate_expression(expr)
+            "" -> generate_expression(e, single_variants)
+            lbl -> lbl <> ": " <> generate_expression(e, single_variants)
           }
         })
         |> string.join(", ")
       name <> "(" <> args_str <> ")"
     }
 
-    ast.EchoExpr(inner) -> "{ echo " <> generate_expression(inner) <> " }"
+    ast.EchoExpr(inner) ->
+      "{ echo " <> generate_expression(inner, single_variants) <> " }"
 
-    // Generate list syntax
     ast.ListExpr(elements) -> {
       let elements_str =
-        elements |> list.map(generate_expression) |> string.join(", ")
+        elements
+        |> list.map(fn(e) { generate_expression(e, single_variants) })
+        |> string.join(", ")
       "[" <> elements_str <> "]"
     }
 
     ast.ListConsExpr(head, tail) -> {
       "["
-      <> generate_expression(head)
+      <> generate_expression(head, single_variants)
       <> ", .."
-      <> generate_expression(tail)
+      <> generate_expression(tail, single_variants)
       <> "]"
     }
 
-    ast.CondExpr(clauses) -> generate_cond(clauses)
+    ast.CondExpr(clauses) -> generate_cond(clauses, single_variants)
 
     ast.CaseExpr(subject, clauses) -> {
-      let sub_str = generate_expression(subject)
+      let sub_str = generate_expression(subject, single_variants)
       let clauses_str =
-        clauses |> list.map(generate_case_clause) |> string.join("\n    ")
+        clauses
+        |> list.map(fn(c) { generate_case_clause(c, single_variants) })
+        |> string.join("\n    ")
       "case " <> sub_str <> " {\n    " <> clauses_str <> "\n  }"
     }
 
     ast.TupleExpr(elements) -> {
       let elements_str =
-        elements |> list.map(generate_expression) |> string.join(", ")
+        elements
+        |> list.map(fn(e) { generate_expression(e, single_variants) })
+        |> string.join(", ")
       "#(" <> elements_str <> ")"
     }
 
     ast.TupleIndexExpr(tuple, idx) -> {
-      generate_expression(tuple) <> "." <> int.to_string(idx)
+      generate_expression(tuple, single_variants) <> "." <> int.to_string(idx)
     }
 
     ast.MapExpr(pairs) -> {
@@ -481,9 +558,9 @@ fn generate_expression(expr: ast.Expr) -> String {
         |> list.map(fn(p) {
           let #(k, v) = p
           "#("
-          <> generate_expression(k)
+          <> generate_expression(k, single_variants)
           <> ", "
-          <> generate_expression(v)
+          <> generate_expression(v, single_variants)
           <> ")"
         })
         |> string.join(", ")
@@ -493,18 +570,18 @@ fn generate_expression(expr: ast.Expr) -> String {
     ast.AnonFnExpr(params, body) -> {
       let params_str = params |> list.map(generate_pattern) |> string.join(", ")
       let body_str =
-        body |> list.map(generate_statement) |> string.join("\n      ")
+        body
+        |> list.map(fn(s) { generate_statement(s, single_variants) })
+        |> string.join("\n      ")
       "fn(" <> params_str <> ") {\n      " <> body_str <> "\n    }"
     }
 
-    // Record Field Access
     ast.RecordAccessExpr(base, field) -> {
-      generate_expression(base) <> "." <> field
+      generate_expression(base, single_variants) <> "." <> field
     }
 
-    // Struct update syntax (e.g., Team(team | coach: new_coach))
     ast.RecordUpdateExpr(name, base, updates) -> {
-      let base_str = generate_expression(base)
+      let base_str = generate_expression(base, single_variants)
 
       case updates {
         [] -> name <> "(.." <> base_str <> ")"
@@ -512,10 +589,10 @@ fn generate_expression(expr: ast.Expr) -> String {
           let updates_str =
             updates
             |> list.map(fn(arg) {
-              let #(label, expr) = arg
+              let #(label, e) = arg
               case label {
-                "" -> generate_expression(expr)
-                lbl -> lbl <> ": " <> generate_expression(expr)
+                "" -> generate_expression(e, single_variants)
+                lbl -> lbl <> ": " <> generate_expression(e, single_variants)
               }
             })
             |> string.join(", ")
@@ -526,7 +603,9 @@ fn generate_expression(expr: ast.Expr) -> String {
 
     ast.BlockExpr(stmts) -> {
       let stmts_str =
-        stmts |> list.map(generate_statement) |> string.join("\n      ")
+        stmts
+        |> list.map(fn(s) { generate_statement(s, single_variants) })
+        |> string.join("\n      ")
       "{\n      " <> stmts_str <> "\n    }"
     }
 
@@ -535,11 +614,11 @@ fn generate_expression(expr: ast.Expr) -> String {
 
     ast.PanicExpr -> "panic"
 
-    ast.PanicAsExpr(msg) -> "panic as " <> generate_expression(msg)
+    ast.PanicAsExpr(msg) ->
+      "panic as " <> generate_expression(msg, single_variants)
   }
 }
 
-// Recursive helper to build ["arg_0", "arg_1", ...] up to arity
 fn make_synthetic_params(
   current: Int,
   arity: Int,
@@ -555,18 +634,20 @@ fn make_synthetic_params(
   }
 }
 
-fn generate_cond(clauses: List(ast.CondClause)) -> String {
+fn generate_cond(
+  clauses: List(ast.CondClause),
+  single_variants: Set(String),
+) -> String {
   case clauses {
     [] -> "panic as \"No cond clause matched\""
     [ast.CondClause(cond_expr, body_expr), ..rest] -> {
-      // SYNTACTIC SUGAR: If they use `True ->` or `_ ->`, just output the body natively!
       case cond_expr {
         ast.IdentExpr("True") | ast.IdentExpr("_") ->
-          generate_expression(body_expr)
+          generate_expression(body_expr, single_variants)
         _ -> {
-          let c = generate_expression(cond_expr)
-          let b = generate_expression(body_expr)
-          let r = generate_cond(rest)
+          let c = generate_expression(cond_expr, single_variants)
+          let b = generate_expression(body_expr, single_variants)
+          let r = generate_cond(rest, single_variants)
           "case "
           <> c
           <> " {\n  True -> "
@@ -580,16 +661,21 @@ fn generate_cond(clauses: List(ast.CondClause)) -> String {
   }
 }
 
-fn generate_case_clause(clause: ast.CaseClause) -> String {
+fn generate_case_clause(
+  clause: ast.CaseClause,
+  single_variants: Set(String),
+) -> String {
   let pat_str =
-    clause.patterns |> list.map(generate_expression) |> string.join(" | ")
+    clause.patterns
+    |> list.map(fn(p) { generate_expression(p, single_variants) })
+    |> string.join(" | ")
 
   let guard_str = case clause.guard {
     [] -> ""
-    [g] -> " if " <> generate_expression(g)
+    [g] -> " if " <> generate_expression(g, single_variants)
     _ -> ""
   }
 
-  let body_str = generate_expression(clause.body)
+  let body_str = generate_expression(clause.body, single_variants)
   pat_str <> guard_str <> " -> " <> body_str
 }

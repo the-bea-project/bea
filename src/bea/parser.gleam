@@ -34,13 +34,13 @@ fn parse_statements(
     }
 
     // Handle `pub type`
-    [lexer.Pub, lexer.Type, lexer.TypeIdent(name), lexer.LBrace, ..rest] -> {
-      parse_custom_type(True, name, rest, acc)
+    [lexer.Pub, lexer.Type, lexer.TypeIdent(name), ..rest] -> {
+      parse_type_definition(True, name, rest, acc)
     }
 
     // Handle private `type`
-    [lexer.Type, lexer.TypeIdent(name), lexer.LBrace, ..rest] -> {
-      parse_custom_type(False, name, rest, acc)
+    [lexer.Type, lexer.TypeIdent(name), ..rest] -> {
+      parse_type_definition(False, name, rest, acc)
     }
 
     // Handle `pub const`
@@ -735,6 +735,30 @@ fn parse_type_args(
         _ -> panic as "Syntax Error: Expected ',' or ')' in type parameters"
       }
     }
+  }
+}
+
+fn parse_type_definition(
+  is_pub: Bool,
+  name: String,
+  tokens: List(Token),
+  acc: List(ast.Statement),
+) -> List(ast.Statement) {
+  case tokens {
+    // Generic custom type: pub type TreasureChest(t) { ... }
+    [lexer.LParen, ..after_lparen] -> {
+      let #(params, after_params) = parse_type_args(after_lparen, [])
+      let assert [lexer.LBrace, ..after_brace] = after_params
+      let full_name = name <> "(" <> string.join(params, ", ") <> ")"
+      parse_custom_type(is_pub, full_name, after_brace, acc)
+    }
+
+    // Non-generic custom type: pub type Pizza { ... }
+    [lexer.LBrace, ..after_brace] -> {
+      parse_custom_type(is_pub, name, after_brace, acc)
+    }
+
+    _ -> panic as "Syntax Error: Expected '(' or '{' after type name"
   }
 }
 
