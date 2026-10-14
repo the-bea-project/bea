@@ -10,18 +10,9 @@ import gleam/string
 pub fn generate(program: ast.Program) -> String {
   let ast.Program(statements) = program
 
-  // 1. Walk the AST to collect required imports
-  let imports_set = collect_imports(statements, set.new())
-  let imports_str =
-    imports_set
-    |> set.to_list()
-    |> list.map(fn(mod) { "import " <> mod })
-    |> string.join("\n")
-
-  // 2. Identify all single-variant custom types (irrefutable records)
   let single_variants = collect_single_variants(statements)
 
-  // 3. Generate the main body code
+  // 1. Generate the main body code FIRST
   let body_str =
     statements
     |> list.filter(fn(s) {
@@ -33,7 +24,70 @@ pub fn generate(program: ast.Program) -> String {
     |> list.map(fn(s) { generate_statement(s, single_variants) })
     |> string.join("\n\n")
 
-  // 4. Stitch them together
+  // 2. Walk the AST to collect explicit imports the user wrote
+  let base_imports = collect_imports(statements, set.new())
+
+  // 3. SMART AUTO-IMPORTS
+
+  // --- Dict ---
+  let uses_dict_mod = string.contains(body_str, "dict.")
+  let uses_dict_type = string.contains(body_str, "Dict")
+  let i1 = case uses_dict_mod, uses_dict_type {
+    False, False -> base_imports
+    True, False -> base_imports |> set.insert("gleam/dict")
+    _, True ->
+      base_imports
+      |> set.delete("gleam/dict")
+      |> set.insert("gleam/dict.{type Dict}")
+  }
+
+  // --- Result ---
+  let i2 = case string.contains(body_str, "result.") {
+    True -> set.insert(i1, "gleam/result")
+    False -> i1
+  }
+
+  // --- Option ---
+  let uses_option = string.contains(body_str, "Option")
+  let uses_some = string.contains(body_str, "Some(")
+  let uses_none = string.contains(body_str, "None")
+
+  let option_injects = []
+  let option_injects = case uses_option {
+    True -> ["type Option", ..option_injects]
+    False -> option_injects
+  }
+  let option_injects = case uses_some {
+    True -> ["Some", ..option_injects]
+    False -> option_injects
+  }
+  let option_injects = case uses_none {
+    True -> ["None", ..option_injects]
+    False -> option_injects
+  }
+
+  let i3 = case option_injects {
+    [] -> i2
+    _ -> {
+      let inj_str = "gleam/option.{" <> string.join(option_injects, ", ") <> "}"
+      i2 |> set.delete("gleam/option") |> set.insert(inj_str)
+    }
+  }
+
+  // --- Bool (for if/return guard clauses) ---
+  let final_imports = case string.contains(body_str, "bool.guard") {
+    True -> set.insert(i3, "gleam/bool")
+    False -> i3
+  }
+
+  // 4. Generate the imports string
+  let imports_str =
+    final_imports
+    |> set.to_list()
+    |> list.map(fn(mod) { "import " <> mod })
+    |> string.join("\n")
+
+  // 5. Stitch them together
   case imports_str {
     "" -> body_str
     _ -> imports_str <> "\n\n" <> body_str
@@ -116,20 +170,12 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
       })
 
     ast.IfStmt(_, body, else_body) -> {
-      let base_imports =
-        imports
-        |> collect_imports(body, _)
-        |> collect_imports(else_body, _)
-
-      case body {
-        [ast.ReturnStmt(_)] -> set.insert(base_imports, "gleam/bool")
-        _ -> base_imports
-      }
+      imports
+      |> collect_imports(body, _)
+      |> collect_imports(else_body, _)
     }
 
     ast.ImportStmt(path) -> set.insert(imports, path)
-    ast.AssignStmt(_, ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
-    ast.ExprStmt(ast.TryExpr(_)) -> set.insert(imports, "gleam/result")
 
     _ -> imports
   }
@@ -325,6 +371,15 @@ fn generate_statement(
           }
         }
       }
+    }
+
+    // Type Aliases
+    ast.TypeAliasStmt(is_pub, name, aliased_type) -> {
+      let pub_prefix = case is_pub {
+        True -> "pub "
+        False -> ""
+      }
+      pub_prefix <> "type " <> name <> " = " <> aliased_type
     }
 
     ast.ImportStmt(_) -> ""

@@ -1,5 +1,4 @@
 // src/bea/parser.gleam
-// src/bea/parser.gleam
 
 import bea/ast
 import bea/lexer.{type Token}
@@ -745,20 +744,39 @@ fn parse_type_definition(
   acc: List(ast.Statement),
 ) -> List(ast.Statement) {
   case tokens {
-    // Generic custom type: pub type TreasureChest(t) { ... }
-    [lexer.LParen, ..after_lparen] -> {
-      let #(params, after_params) = parse_type_args(after_lparen, [])
-      let assert [lexer.LBrace, ..after_brace] = after_params
-      let full_name = name <> "(" <> string.join(params, ", ") <> ")"
-      parse_custom_type(is_pub, full_name, after_brace, acc)
+    // Type Alias: pub type Scores = Dict(String, Int)
+    [lexer.Eq, ..after_eq] -> {
+      let #(type_str, after_type) = parse_type(after_eq)
+      let stmt = ast.TypeAliasStmt(is_pub, name, type_str)
+      parse_statements(after_type, [stmt, ..acc])
     }
 
-    // Non-generic custom type: pub type Pizza { ... }
+    // Generic type OR Generic Alias: pub type TreasureChest(t) ...
+    [lexer.LParen, ..after_lparen] -> {
+      let #(params, after_params) = parse_type_args(after_lparen, [])
+      let full_name = name <> "(" <> string.join(params, ", ") <> ")"
+
+      case after_params {
+        [lexer.LBrace, ..after_brace] -> {
+          parse_custom_type(is_pub, full_name, after_brace, acc)
+        }
+        // Generic Alias: pub type Scores(t) = Dict(String, t)
+        [lexer.Eq, ..after_eq] -> {
+          let #(type_str, after_type) = parse_type(after_eq)
+          let stmt = ast.TypeAliasStmt(is_pub, full_name, type_str)
+          parse_statements(after_type, [stmt, ..acc])
+        }
+        _ ->
+          panic as "Syntax Error: Expected '{' or '=' after generic parameters"
+      }
+    }
+
+    // Non-generic custom type
     [lexer.LBrace, ..after_brace] -> {
       parse_custom_type(is_pub, name, after_brace, acc)
     }
 
-    _ -> panic as "Syntax Error: Expected '(' or '{' after type name"
+    _ -> panic as "Syntax Error: Expected '(', '{', or '=' after type name"
   }
 }
 

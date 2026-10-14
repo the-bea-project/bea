@@ -151,7 +151,6 @@ fn scan(chars: List(String), tokens: List(Token)) {
     [":", ..rest] -> scan(rest, [Colon, ..tokens])
     ["#", ..rest] -> scan(rest, [Hash, ..tokens])
     ["&", ..rest] -> scan(rest, [Ampersand, ..tokens])
-    ["_", ..rest] -> scan(rest, [Underscore, ..tokens])
     [",", ..rest] -> scan(rest, [Comma, ..tokens])
     [".", ..rest] -> scan(rest, [Dot, ..tokens])
     ["[", ..rest] -> scan(rest, [LBracket, ..tokens])
@@ -163,7 +162,7 @@ fn scan(chars: List(String), tokens: List(Token)) {
     ["`", ..rest] -> consume_string(rest, "`", "", RawStringLit, tokens)
     // Catch-all for Identifiers, Keywords, and Numbers
     [char, ..rest] -> {
-      case is_alpha(char) {
+      case is_alpha(char) || char == "_" {
         True -> consume_ident(rest, char, tokens)
         False -> {
           case is_digit(char) {
@@ -288,6 +287,7 @@ fn match_keyword(word: String) -> Token {
     "todo" -> Todo
     "panic" -> Panic
     "in" -> In
+    "_" -> Underscore
     _ -> {
       // Check if the first letter is uppercase for TypeIdent
       let first_char = string.slice(word, 0, 1)
@@ -318,6 +318,8 @@ fn consume_number(
   tokens: List(Token),
 ) -> List(Token) {
   case chars {
+    // Ignore underscores so we can parse numbers like 1_000_000
+    ["_", ..rest] -> consume_number(rest, acc, has_dot, tokens)
     [char, ..rest] -> {
       case is_digit(char) {
         // Still a digit, keep consuming

@@ -98,6 +98,9 @@ pub type Statement {
 
   // Module-level constants
   ConstStmt(is_pub: Bool, name: String, value: Expr)
+
+  // type Scores = Dict(String, Int)
+  TypeAliasStmt(is_pub: Bool, name: String, aliased_type: String)
 }
 
 // A full Bea program is just a list of top-level statements
