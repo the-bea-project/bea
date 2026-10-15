@@ -445,9 +445,19 @@ fn is_simple_params(params: List(ast.Expr)) -> Bool {
     case p {
       ast.IdentExpr(_) -> True
       ast.TypedExpr(ast.IdentExpr(_), _) -> True
+      ast.LabelExpr(_, ast.IdentExpr(_)) -> True
+      ast.TypedExpr(ast.LabelExpr(_, ast.IdentExpr(_)), _) -> True
       _ -> False
     }
   })
+}
+
+fn strip_param_metadata(expr: ast.Expr) -> ast.Expr {
+  case expr {
+    ast.TypedExpr(inner, _) -> strip_param_metadata(inner)
+    ast.LabelExpr(_, inner) -> strip_param_metadata(inner)
+    _ -> expr
+  }
 }
 
 fn generate_clause_arm(
@@ -455,7 +465,11 @@ fn generate_clause_arm(
   single_variants: Set(String),
 ) -> String {
   let ast.Clause(params, guard, body) = clause
-  let pattern_str = params |> list.map(generate_pattern) |> string.join(", ")
+  let pattern_str =
+    params
+    |> list.map(strip_param_metadata)
+    |> list.map(generate_pattern)
+    |> string.join(", ")
 
   let guard_str = case guard {
     [] -> ""
@@ -511,6 +525,10 @@ fn generate_pattern(expr: ast.Expr) -> String {
         })
         |> string.join(", ")
       name <> "(" <> args_str <> ")"
+    }
+
+    ast.LabelExpr(label, inner_expr) -> {
+      label <> " " <> generate_pattern(inner_expr)
     }
 
     _ -> panic as "Unsupported pattern expression"
@@ -671,6 +689,11 @@ fn generate_expression(expr: ast.Expr, single_variants: Set(String)) -> String {
 
     ast.PanicAsExpr(msg) ->
       "panic as " <> generate_expression(msg, single_variants)
+
+    // Handle labels in standard expressions
+    ast.LabelExpr(label, inner_expr) -> {
+      label <> " " <> generate_expression(inner_expr, single_variants)
+    }
   }
 }
 

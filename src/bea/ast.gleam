@@ -53,6 +53,8 @@ pub type Expr {
   PanicExpr
   // A panic with a custom message expression
   PanicAsExpr(Expr)
+  // To handle parameter labels like `color color: Color`
+  LabelExpr(label: String, expr: Expr)
 }
 
 pub type Clause {

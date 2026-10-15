@@ -68,16 +68,25 @@ fn parse_pattern_params(
   case tokens {
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
     _ -> {
-      // 1. Parse the parameter name
+      // 1. Parse the first expression (this could be a label, or the actual param)
       let #(expr, after_expr) = parse_expression(tokens)
 
+      // 1b. INTERCEPT LABEL: If we have an identifier followed directly by another identifier!
+      // (e.g., `target_color` followed by `color`)
+      let #(actual_expr, after_name) = case expr, after_expr {
+        ast.IdentExpr(label), [lexer.Ident(name), ..rest2] -> {
+          #(ast.LabelExpr(label, ast.IdentExpr(name)), rest2)
+        }
+        _, _ -> #(expr, after_expr)
+      }
+
       // 2. Intercept type annotations (e.g., `: Int`)
-      let #(final_expr, after_type) = case after_expr {
+      let #(final_expr, after_type) = case after_name {
         [lexer.Colon, ..rest2] -> {
           let #(type_str, rest3) = parse_type(rest2)
-          #(ast.TypedExpr(expr, type_str), rest3)
+          #(ast.TypedExpr(actual_expr, type_str), rest3)
         }
-        _ -> #(expr, after_expr)
+        _ -> #(actual_expr, after_name)
       }
 
       // 3. Look for the comma or closing parenthesis
