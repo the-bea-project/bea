@@ -104,19 +104,29 @@ fn parse_pattern_params(
 fn collapse_clauses(statements: List(ast.Statement)) -> List(ast.Statement) {
   case statements {
     [] -> []
-    // Match all 4 arguments for both DefStmts
+
     [
       ast.DefStmt(p1, name1, ret1, clauses1),
-      ast.DefStmt(_p2, name2, _ret2, clauses2),
+      ast.DefStmt(p2, name2, ret2, clauses2),
       ..rest
     ]
       if name1 == name2
     -> {
+      // 1. If ANY clause is pub, make the whole function pub
+      let is_pub = p1 || p2
+
+      // 2. Keep whichever return type isn't an empty string
+      let return_type = case ret1 {
+        "" -> ret2
+        _ -> ret1
+      }
+
       collapse_clauses([
-        ast.DefStmt(p1, name1, ret1, list.append(clauses1, clauses2)),
+        ast.DefStmt(is_pub, name1, return_type, list.append(clauses1, clauses2)),
         ..rest
       ])
     }
+
     [stmt, ..rest] -> [stmt, ..collapse_clauses(rest)]
   }
 }
@@ -137,7 +147,7 @@ fn continue_postfix(
       continue_postfix(ast.TupleIndexExpr(left, idx), rest)
     [lexer.Dot, lexer.Ident(field), ..rest] ->
       continue_postfix(ast.RecordAccessExpr(left, field), rest)
-    [lexer.Ident("as"), lexer.Ident(alias_name), ..rest] ->
+    [lexer.As, lexer.Ident(alias_name), ..rest] ->
       continue_postfix(ast.AliasExpr(left, alias_name), rest)
     [lexer.Question, ..rest] -> continue_postfix(ast.TryExpr(left), rest)
     _ -> #(left, tokens)
@@ -152,7 +162,13 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
 
     [lexer.Not, ..rest] -> {
       let #(inner_expr, after_inner) = parse_primary(rest)
-      #(ast.UnaryExpr("not", inner_expr), after_inner)
+      #(ast.UnaryExpr("!", inner_expr), after_inner)
+    }
+
+    // Handle the '!' symbol
+    [lexer.Bang, ..rest] -> {
+      let #(inner_expr, after_inner) = parse_primary(rest)
+      #(ast.UnaryExpr("!", inner_expr), after_inner)
     }
 
     // Anonymous functions (e.g., fn(x) { x.1 == 42 })
@@ -379,13 +395,15 @@ fn continue_expression(
       let #(right, after_right) = parse_operand(rest)
       continue_expression(ast.BinaryExpr(left, "<>", right), after_right)
     }
+    // Translate `and` directly to `&&`
     [lexer.And, ..rest] -> {
       let #(right, after_right) = parse_operand(rest)
-      continue_expression(ast.BinaryExpr(left, "and", right), after_right)
+      continue_expression(ast.BinaryExpr(left, "&&", right), after_right)
     }
+    // Translate `or` directly to `||`
     [lexer.Or, ..rest] -> {
       let #(right, after_right) = parse_operand(rest)
-      continue_expression(ast.BinaryExpr(left, "or", right), after_right)
+      continue_expression(ast.BinaryExpr(left, "||", right), after_right)
     }
 
     // Catch-all: no operators found, return the expression as-is

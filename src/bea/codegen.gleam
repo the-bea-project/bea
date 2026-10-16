@@ -546,7 +546,7 @@ fn generate_expression(expr: ast.Expr, single_variants: Set(String)) -> String {
       generate_expression(pattern, single_variants) <> " as " <> name
     }
 
-    ast.UnaryExpr("not", inner) ->
+    ast.UnaryExpr("!", inner) ->
       "!" <> generate_expression(inner, single_variants)
     ast.UnaryExpr(op, _) -> panic as { "Unsupported unary operator: " <> op }
 
