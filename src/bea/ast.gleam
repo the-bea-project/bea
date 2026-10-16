@@ -25,6 +25,8 @@ pub type Expr {
   UnaryExpr(op: String, expr: Expr)
   // For piping to `echo`
   EchoExpr(Expr)
+  // If control flow
+  IfExpr(condition: Expr, body: List(Statement), else_body: List(Statement))
   CondExpr(clauses: List(CondClause))
   CaseExpr(subject: Expr, clauses: List(CaseClause))
   // Tuple expression `("a", 2)`
@@ -88,9 +90,6 @@ pub type Statement {
 
   // Assign a value to a variable
   AssignStmt(pattern: Expr, value: Expr)
-
-  // If control flow
-  IfStmt(condition: Expr, body: List(Statement), else_body: List(Statement))
 
   // Import
   ImportStmt(path: String)

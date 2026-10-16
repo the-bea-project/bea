@@ -85,21 +85,6 @@ fn hoist_statement(
       #(final_counter, [ast.DefStmt(is_pub, name, ret_type, new_clauses)])
     }
 
-    // --- Traversing If Statements ---
-    ast.IfStmt(cond, body, else_body) -> {
-      // 1. Hoist the condition (e.g., if get_val()? == 1)
-      let #(c1, hoisted_cond, new_cond) = hoist_expr(cond, counter)
-
-      // 2. Hoist the True block
-      let #(c2, new_body) = hoist_statements(body, c1)
-
-      // 3. Hoist the False block
-      let #(c3, new_else) = hoist_statements(else_body, c2)
-
-      let final_stmt = ast.IfStmt(new_cond, new_body, new_else)
-      #(c3, list.append(hoisted_cond, [final_stmt]))
-    }
-
     // Base case for things like ConstStmt or ImportStmt that don't need hoisting
     _ -> #(counter, [stmt])
   }
@@ -148,6 +133,16 @@ fn hoist_expr(
           )
         })
       #(final_counter, all_hoisted, ast.CallExpr(name, new_args))
+    }
+
+    // --- Traversing If Expressions ---
+    ast.IfExpr(cond, body, else_body) -> {
+      let #(c1, hoisted_cond, new_cond) = hoist_expr(cond, counter)
+      let #(c2, new_body) = hoist_statements(body, c1)
+      let #(c3, new_else) = hoist_statements(else_body, c2)
+
+      let final_expr = ast.IfExpr(new_cond, new_body, new_else)
+      #(c3, hoisted_cond, final_expr)
     }
 
     // --- Traversing Case Expressions ---

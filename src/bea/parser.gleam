@@ -260,6 +260,12 @@ fn parse_primary(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
     // Catch the wildcard underscore
     [lexer.Underscore, ..rest] -> #(ast.IdentExpr("_"), rest)
 
+    // If / Else statements
+    [lexer.If, ..rest] -> {
+      let #(if_expr, after_if) = parse_if(rest)
+      #(if_expr, after_if)
+    }
+
     // Parse cond { ... }
     [lexer.Cond, lexer.LBrace, ..rest] -> {
       let #(clauses, after_cond) = parse_cond_clauses(rest, [])
@@ -423,12 +429,6 @@ fn parse_block(
       parse_block(after_expr, [ast.ReturnStmt(expr), ..acc])
     }
 
-    // If / Else statements
-    [lexer.If, ..rest] -> {
-      let #(if_stmt, after_if) = parse_if(rest)
-      parse_block(after_if, [if_stmt, ..acc])
-    }
-
     // Catch-all: Standalone expressions & assignments
     _ -> {
       // Parse whatever is on the left
@@ -489,6 +489,12 @@ fn consume_arg_separator(
   case tokens {
     [lexer.Comma, ..rest] -> parse_args(rest, acc)
     [lexer.RParen, ..rest] -> #(list.reverse(acc), rest)
+    // Handle partial struct matching `| _ )`
+    [lexer.Pipe, lexer.Underscore, lexer.RParen, ..rest] -> {
+      // Secretly inject Gleam's `..` into the AST!
+      let partial_marker = #("", ast.IdentExpr(".."))
+      #(list.reverse([partial_marker, ..acc]), rest)
+    }
     _ -> panic as "Syntax Error: Expected ',' or ')' in function arguments"
   }
 }
@@ -533,31 +539,22 @@ fn parse_list_elements(
   }
 }
 
-fn parse_if(tokens: List(Token)) -> #(ast.Statement, List(Token)) {
-  // 1. Parse condition
+fn parse_if(tokens: List(Token)) -> #(ast.Expr, List(Token)) {
   let #(condition, after_cond) = parse_expression(tokens)
-
-  // 2. Expect '{' and parse body
   let assert [lexer.LBrace, ..after_lbrace] = after_cond
   let #(body, after_body) = parse_block(after_lbrace, [])
 
-  // 3. Check what comes after the block
   case after_body {
-    // Handle 'else if' by recursively calling parse_if
     [lexer.Else, lexer.If, ..after_elif] -> {
-      let #(elif_stmt, after_all) = parse_if(after_elif)
-      // Wrap the else-if statement inside a list for the else_body
-      #(ast.IfStmt(condition, body, [elif_stmt]), after_all)
+      let #(elif_expr, after_all) = parse_if(after_elif)
+      // Wrap elif_expr in ExprStmt!
+      #(ast.IfExpr(condition, body, [ast.ExprStmt(elif_expr)]), after_all)
     }
-
-    // Handle standard 'else {'
     [lexer.Else, lexer.LBrace, ..after_else_lbrace] -> {
       let #(else_body, after_else) = parse_block(after_else_lbrace, [])
-      #(ast.IfStmt(condition, body, else_body), after_else)
+      #(ast.IfExpr(condition, body, else_body), after_else)
     }
-
-    // No else block
-    _ -> #(ast.IfStmt(condition, body, []), after_body)
+    _ -> #(ast.IfExpr(condition, body, []), after_body)
   }
 }
 

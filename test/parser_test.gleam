@@ -29,7 +29,6 @@ pub fn parser_basic_function_test() {
     ast.ReturnStmt(ast.BinaryExpr(ast.IntExpr(40), "+", ast.IntExpr(2))),
   ]
 
-  // Added `[]` for guard here
   let expected_clause =
     ast.Clause(
       [ast.IdentExpr("user_id"), ast.IdentExpr("status")],
@@ -60,9 +59,12 @@ pub fn parser_if_statement_test() {
 
   let if_body = [ast.ReturnStmt(ast.StringExpr("active"))]
   let else_body = [ast.ReturnStmt(ast.StringExpr("inactive"))]
-  let expected_body = [ast.IfStmt(ast.IdentExpr("status"), if_body, else_body)]
 
-  // Added `[]` for guard here
+  // FIX: Wrap the new IfExpr inside an ExprStmt
+  let expected_body = [
+    ast.ExprStmt(ast.IfExpr(ast.IdentExpr("status"), if_body, else_body)),
+  ]
+
   let expected_clause = ast.Clause([ast.IdentExpr("status")], [], expected_body)
 
   let expected_def = ast.DefStmt(False, "check_status", "", [expected_clause])

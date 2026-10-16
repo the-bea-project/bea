@@ -169,12 +169,6 @@ fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
         collect_imports(clause.body, acc)
       })
 
-    ast.IfStmt(_, body, else_body) -> {
-      imports
-      |> collect_imports(body, _)
-      |> collect_imports(else_body, _)
-    }
-
     ast.ImportStmt(path) -> set.insert(imports, path)
 
     _ -> imports
@@ -306,6 +300,13 @@ fn generate_statement(
       }
     }
 
+    // Optimized early return: Standalone if that just returns
+    ast.ExprStmt(ast.IfExpr(condition, [ast.ReturnStmt(ret_expr)], [])) -> {
+      let cond_str = generate_expression(condition, single_variants)
+      let ret_str = generate_expression(ret_expr, single_variants)
+      "use <- bool.guard(when: " <> cond_str <> ", return: " <> ret_str <> ")"
+    }
+
     // Error Propagation Standalone Expression
     ast.ExprStmt(ast.TryExpr(value_expr)) -> {
       "use _ <- result.try("
@@ -315,63 +316,6 @@ fn generate_statement(
 
     // Standard Standalone Expression
     ast.ExprStmt(expr) -> generate_expression(expr, single_variants)
-
-    // If / Else Statements
-    ast.IfStmt(condition, body, else_body) -> {
-      let cond_str = generate_expression(condition, single_variants)
-
-      case body {
-        [ast.ReturnStmt(ret_expr)] -> {
-          let ret_str = generate_expression(ret_expr, single_variants)
-          let guard_str =
-            "use <- bool.guard(when: "
-            <> cond_str
-            <> ", return: "
-            <> ret_str
-            <> ")"
-
-          case else_body {
-            [] -> guard_str
-            _ -> {
-              let else_str =
-                else_body
-                |> list.map(fn(s) { generate_statement(s, single_variants) })
-                |> string.join("\n  ")
-              guard_str <> "\n  " <> else_str
-            }
-          }
-        }
-
-        _ -> {
-          let body_str =
-            body
-            |> list.map(fn(s) { generate_statement(s, single_variants) })
-            |> string.join("\n      ")
-
-          case else_body {
-            [] ->
-              "case "
-              <> cond_str
-              <> " {\n    True -> {\n      "
-              <> body_str
-              <> "\n    }\n    False -> Nil\n  }"
-            _ -> {
-              let else_str =
-                else_body
-                |> list.map(fn(s) { generate_statement(s, single_variants) })
-                |> string.join("\n      ")
-              "case "
-              <> cond_str
-              <> " {\n    True -> {\n      "
-              <> body_str
-              <> "\n    }\n    False -> {\n      "
-              <> else_str
-              <> "\n    }\n  }"
-            }
-          }
-        }
-      }
-    }
 
     // Type Aliases
     ast.TypeAliasStmt(is_pub, name, aliased_type) -> {
@@ -600,6 +544,36 @@ fn generate_expression(expr: ast.Expr, single_variants: Set(String)) -> String {
       <> ", .."
       <> generate_expression(tail, single_variants)
       <> "]"
+    }
+
+    ast.IfExpr(condition, body, else_body) -> {
+      let cond_str = generate_expression(condition, single_variants)
+      let body_str =
+        body
+        |> list.map(fn(s) { generate_statement(s, single_variants) })
+        |> string.join("\n      ")
+
+      case else_body {
+        [] ->
+          "case "
+          <> cond_str
+          <> " {\n    True -> {\n      "
+          <> body_str
+          <> "\n    }\n    False -> Nil\n  }"
+        _ -> {
+          let else_str =
+            else_body
+            |> list.map(fn(s) { generate_statement(s, single_variants) })
+            |> string.join("\n      ")
+          "case "
+          <> cond_str
+          <> " {\n    True -> {\n      "
+          <> body_str
+          <> "\n    }\n    False -> {\n      "
+          <> else_str
+          <> "\n    }\n  }"
+        }
+      }
     }
 
     ast.CondExpr(clauses) -> generate_cond(clauses, single_variants)
