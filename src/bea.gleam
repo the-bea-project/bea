@@ -24,42 +24,91 @@ pub fn main() {
   case argv.load().arguments {
     ["transpile", target] -> {
       let root_module = setup_project(target)
-      io.println("Transpiled project tree starting at " <> root_module)
+      io.println(
+        green("Transpiled project tree starting at: ") <> bold(root_module),
+      )
+    }
+
+    // Scaffold a new project!
+    ["new", project_name] -> {
+      let src_dir = project_name <> "/src"
+      let assert Ok(_) = simplifile.create_directory_all(src_dir)
+
+      let toml =
+        "name = \""
+        <> project_name
+        <> "\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 0.34.0 and < 2.0.0\"\n"
+      let assert Ok(_) = simplifile.write(project_name <> "/bea.toml", toml)
+
+      // Clean, simple Bea code without the io import
+      let initial_code =
+        "pub def main() {\n  echo \"Hello from " <> project_name <> "!\"\n}\n"
+      let assert Ok(_) = simplifile.write(src_dir <> "/main.bea", initial_code)
+
+      io.println(green("Created new Bea project: ") <> bold(project_name))
+      io.println(cyan("   cd ") <> project_name)
+      io.println(cyan("   bea run ."))
     }
 
     ["check", target] -> {
       let _ = setup_project(target)
-      io.println("Checking project via Gleam...")
+      io.println(cyan("Checking project via Gleam..."))
       let result = shellout.command("gleam", ["check"], ".beabuild", [])
       case result {
         Ok(output) -> io.print(output)
-        Error(#(_code, err_msg)) -> io.println(err_msg)
+        Error(#(_code, err_msg)) -> io.println(red(err_msg))
       }
     }
 
     ["build", target] -> {
       let _ = setup_project(target)
-      io.println("Building project via Gleam...")
+      io.println(cyan("Building project via Gleam..."))
       let result = shellout.command("gleam", ["build"], ".beabuild", [])
       case result {
         Ok(output) -> io.print(output)
-        Error(#(_code, err_msg)) -> io.println(err_msg)
+        Error(#(_code, err_msg)) -> io.println(red(err_msg))
       }
     }
 
-    ["run", target] -> {
-      let root_module = setup_project(target)
-      io.println("Running " <> root_module <> "...\n")
+    // Go-like ergonomics: `bea run` or `bea run .` defaults to src/main.bea
+    ["run"] | ["run", "."] -> run_project("src/main.bea")
+    ["run", target] -> run_project(target)
 
-      let result =
-        shellout.command("gleam", ["run", "-m", root_module], ".beabuild", [])
-      case result {
-        Ok(output) -> io.print(output)
-        Error(#(_code, err_msg)) -> io.println(err_msg)
+    ["add", ..packages] -> {
+      case packages {
+        [] ->
+          io.println(red("Error: Please specify at least one package to add."))
+        _ -> {
+          let _ = setup_project("main.bea")
+
+          let pkg_str = string.join(packages, ", ")
+          io.println(
+            cyan("Resolving packages '")
+            <> bold(pkg_str)
+            <> cyan("' via Hex..."),
+          )
+
+          // Build the command arguments: ["add", "gsh", "simplifile", "glam"]
+          let args = list.append(["add"], packages)
+          let result = shellout.command("gleam", args, ".beabuild", [])
+
+          case result {
+            Ok(output) -> {
+              io.print(output)
+              let assert Ok(_) =
+                simplifile.copy_file(".beabuild/gleam.toml", "bea.toml")
+              io.println(green("Updated bea.toml successfully!"))
+            }
+            Error(#(_code, err_msg)) -> io.println(red(err_msg))
+          }
+        }
       }
     }
 
-    _ -> io.println("Usage: bea [transpile | build | run] <. | filepath.bea>")
+    _ ->
+      io.println(
+        "Usage: bea [new | transpile | build | run | add] <. | filepath.bea>",
+      )
   }
 }
 
@@ -70,16 +119,21 @@ fn setup_project(target: String) -> String {
 
   let assert Ok(_) = simplifile.create_directory_all(src_dir)
 
-  let toml =
-    "name = \"bea_app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 0.34.0 and < 2.0.0\"\n"
-  let assert Ok(_) = simplifile.write(build_dir <> "/gleam.toml", toml)
-
-  let _ = case !string.ends_with(target, ".bea") {
-    True -> panic as "Error: Target must be a .bea file"
-    False -> Ok(Nil)
+  let toml = case simplifile.read("bea.toml") {
+    Ok(contents) -> contents
+    Error(_) -> {
+      io.println(cyan("Warning: No bea.toml found. Using default manifest."))
+      "name = \"bea_app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngleam_stdlib = \">= 0.34.0 and < 2.0.0\"\n"
+    }
   }
 
-  // Extract the filename as the root module ("path/to/script.bea" -> "script")
+  let assert Ok(_) = simplifile.write(build_dir <> "/gleam.toml", toml)
+
+  case string.ends_with(target, ".bea") {
+    False -> panic as { "Error: Expected a .bea file, got: " <> target }
+    True -> Nil
+  }
+
   let root_module =
     target
     |> string.split("/")
@@ -87,7 +141,6 @@ fn setup_project(target: String) -> String {
     |> result.unwrap("main.bea")
     |> string.replace(".bea", "")
 
-  // Extract the base directory to resolve imports relative to the target file
   let base_dir =
     target
     |> string.split("/")
@@ -101,7 +154,6 @@ fn setup_project(target: String) -> String {
     path -> path
   }
 
-  // Pass base_dir to the crawler
   crawl_and_transpile([root_module], set.new(), src_dir, base_dir)
 
   root_module
@@ -122,7 +174,6 @@ fn crawl_and_transpile(
           let new_visited = set.insert(visited, module)
 
           case resolve_import(module, base_dir) {
-            // 1. Local .bea file -> Transpile to Gleam
             BeaFile(_) -> {
               let filepath = base_dir <> "/" <> module <> ".bea"
 
@@ -131,16 +182,13 @@ fn crawl_and_transpile(
                 Error(_) -> panic as { "Could not find module: " <> filepath }
               }
 
-              // Lex and Parse
               let parsed_ast =
                 source
                 |> lexer.tokenize()
                 |> parser.parse()
 
-              // Run the Desugaring Pass
               let desugared_ast = desugar.process(parsed_ast)
 
-              // Filter imports to queue local (.bea or .gleam) dependencies
               let local_imports =
                 desugared_ast
                 |> extract_imports_from_ast()
@@ -152,10 +200,9 @@ fn crawl_and_transpile(
                 })
 
               let new_queue = list.append(rest, local_imports)
-
               let gleam_code = codegen.generate(desugared_ast)
-
               let out_path = out_dir <> "/" <> module <> ".gleam"
+
               let out_folder =
                 string.split(out_path, "/")
                 |> list.reverse()
@@ -169,10 +216,10 @@ fn crawl_and_transpile(
               crawl_and_transpile(new_queue, new_visited, out_dir, base_dir)
             }
 
-            // 2. Local .gleam file -> Copy straight over
             GleamFile(_) -> {
               let src_path = base_dir <> "/" <> module <> ".gleam"
               let out_path = out_dir <> "/" <> module <> ".gleam"
+
               let out_folder =
                 string.split(out_path, "/")
                 |> list.reverse()
@@ -186,7 +233,6 @@ fn crawl_and_transpile(
               crawl_and_transpile(rest, new_visited, out_dir, base_dir)
             }
 
-            // 3. Stdlib or Hex Package -> Skip file crawling
             ExternalPackage -> {
               crawl_and_transpile(rest, new_visited, out_dir, base_dir)
             }
@@ -197,7 +243,6 @@ fn crawl_and_transpile(
   }
 }
 
-// Extracts import paths directly from the parsed AST
 fn extract_imports_from_ast(program: ast.Program) -> List(String) {
   let ast.Program(statements) = program
   list.filter_map(statements, fn(stmt) {
@@ -208,7 +253,6 @@ fn extract_imports_from_ast(program: ast.Program) -> List(String) {
   })
 }
 
-// Determines whether an import path maps to a local `.bea`, `.gleam`, or external package
 fn resolve_import(import_path: String, base_dir: String) -> LocalImport {
   case string.starts_with(import_path, "gleam/") {
     True -> ExternalPackage
@@ -227,4 +271,55 @@ fn resolve_import(import_path: String, base_dir: String) -> LocalImport {
       }
     }
   }
+}
+
+fn run_project(target: String) {
+  let root_module = setup_project(target)
+  io.println(green("Running ") <> bold(root_module) <> green("...\n"))
+
+  // 1. Build the code inside the hidden directory
+  let build_result = shellout.command("gleam", ["build"], ".beabuild", [])
+
+  case build_result {
+    Error(#(_code, err_msg)) -> io.println(red(err_msg))
+    Ok(_) -> {
+      // 2. Extract all the compiled Erlang bin paths from the build directory
+      let ebin_paths =
+        simplifile.read_directory(".beabuild/build/dev/erlang")
+        |> result.unwrap([])
+        |> list.map(fn(dir) { ".beabuild/build/dev/erlang/" <> dir <> "/ebin" })
+
+      let pa_args = list.flat_map(ebin_paths, fn(path) { ["-pa", path] })
+
+      // 3. Command the Erlang VM to execute the target module's main function
+      let eval_str = root_module <> ":main(), init:stop()."
+      let args = list.append(pa_args, ["-noshell", "-eval", eval_str])
+
+      // 4. Run the compiled code from the PROJECT ROOT (CWD = ".")
+      let run_result = shellout.command("erl", args, ".", [])
+
+      case run_result {
+        Ok(output) -> io.print(output)
+        Error(#(_code, err_msg)) -> io.println(red(err_msg))
+      }
+    }
+  }
+}
+
+// --- Terminal Color Helpers ---
+
+fn green(text: String) -> String {
+  "\u{001b}[32m" <> text <> "\u{001b}[0m"
+}
+
+fn cyan(text: String) -> String {
+  "\u{001b}[36m" <> text <> "\u{001b}[0m"
+}
+
+fn bold(text: String) -> String {
+  "\u{001b}[1m" <> text <> "\u{001b}[0m"
+}
+
+fn red(text: String) -> String {
+  "\u{001b}[31m" <> text <> "\u{001b}[0m"
 }
