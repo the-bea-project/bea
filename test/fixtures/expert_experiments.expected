@@ -1,0 +1,7 @@
+Error("first")
+tick
+tick
+Ok(1)
+Ok(#("exp", 12))
+Ok(5)
+Error(Nil)

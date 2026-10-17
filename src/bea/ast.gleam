@@ -1,110 +1,359 @@
-// src/bea/ast.gleam
+//// The Bea syntax tree.
+////
+//// Every node carries a `Span` (byte offsets into the source). Spans are what
+//// make precise error messages, source maps and the LSP possible.
 
-pub type TypeVariant {
-  // name: "User" or "Active"
-  // fields: [("name", "String"), ("age", "Int")] 
-  // (If there are no fields, it's just an empty list)
-  TypeVariant(name: String, fields: List(#(String, String)))
+import bea/span.{type Span}
+import gleam/option.{type Option}
+
+pub type Module {
+  Module(items: List(Item), module_doc: List(String))
 }
 
-pub type Expr {
-  IntExpr(Int)
-  FloatExpr(Float)
-  StringExpr(String)
-  IdentExpr(String)
-  // Function calls
-  CallExpr(name: String, args: List(#(String, Expr)))
-  // Binary operations (e.g., left + right)
-  BinaryExpr(left: Expr, op: String, right: Expr)
-  // A list of expressions, e.g., [1, 2, 3]
-  ListExpr(elements: List(Expr))
-  // Head tail implementation
-  ListConsExpr(head: Expr, tail: Expr)
-  // Typed expression, e.g. param: Int
-  TypedExpr(expr: Expr, type_name: String)
-  UnaryExpr(op: String, expr: Expr)
-  // For piping to `echo`
-  EchoExpr(Expr)
-  // If control flow
-  IfExpr(condition: Expr, body: List(Statement), else_body: List(Statement))
-  CondExpr(clauses: List(CondClause))
-  CaseExpr(subject: Expr, clauses: List(CaseClause))
-  // Tuple expression `("a", 2)`
-  TupleExpr(elements: List(Expr))
-  // Indexed tuples `tuple.0`
-  TupleIndexExpr(tuple: Expr, index: Int)
-  // Anon functions `fn(x) {...}`
-  AnonFnExpr(params: List(Expr), body: List(Statement))
-  // `?` operator
-  TryExpr(Expr)
-  // Record update syntax, e.g., Team(team | coach: new_coach)
-  RecordUpdateExpr(
-    constructor: String,
-    base: Expr,
-    updates: List(#(String, Expr)),
+pub type Publicity {
+  Public
+  Private
+}
+
+/// `@name(arg, arg)` — passed through to Gleam untouched, e.g.
+/// `@external(erlang, "lists", "reverse")` or `@deprecated("use x")`.
+pub type Attribute {
+  Attribute(span: Span, name: String, args: List(AttributeArg))
+}
+
+pub type AttributeArg {
+  AttrName(String)
+  AttrString(String)
+}
+
+pub type Item {
+  Import(
+    span: Span,
+    module: String,
+    module_span: Span,
+    alias: Option(#(String, Span)),
+    unqualified: List(Unqualified),
   )
-  // Record field access (e.g., team.coach.name)
-  RecordAccessExpr(base: Expr, field: String)
-  // Pattern aliasing: e.g., [head | _] as list
-  AliasExpr(pattern: Expr, name: String)
-  // Map / Dictionary literals: %{ key: val }
-  MapExpr(pairs: List(#(Expr, Expr)))
-  // A block of statements that evaluates to its last expression
-  BlockExpr(statements: List(Statement))
-  // A simple panic
-  PanicExpr
-  // A panic with a custom message expression
-  PanicAsExpr(Expr)
-  // To handle parameter labels like `color color: Color`
-  LabelExpr(label: String, expr: Expr)
+  Function(span: Span, name: String, name_span: Span, clauses: List(Clause))
+  CustomType(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    opaque_: Bool,
+    name: String,
+    name_span: Span,
+    params: List(String),
+    variants: List(Variant),
+  )
+  /// `type Name(a) = Other(a)`
+  TypeAlias(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    params: List(String),
+    aliased: Type,
+  )
+  /// A type with no constructors: `pub type Usd` (phantom / external types).
+  ExternalType(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    params: List(String),
+  )
+  Const(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    annotation: Option(Type),
+    value: Expr,
+  )
 }
 
+pub type Unqualified {
+  Unqualified(span: Span, is_type: Bool, name: String, alias: Option(String))
+}
+
+pub type Variant {
+  Variant(span: Span, name: String, fields: List(Field), doc: List(String))
+}
+
+pub type Field {
+  Field(span: Span, label: Option(String), type_: Type)
+}
+
+/// One `def` line. Consecutive `def`s with the same name form one function.
+/// A clause without a body is either a signature ("function head") or, when
+/// it carries an `@external` attribute, an external function.
 pub type Clause {
-  Clause(params: List(Expr), guard: List(Expr), body: List(Statement))
+  Clause(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name_span: Span,
+    params: List(Param),
+    return_type: Option(Type),
+    guard: Option(Expr),
+    body: Option(List(Statement)),
+  )
 }
 
-pub type CondClause {
-  CondClause(condition: Expr, body: Expr)
+pub type Param {
+  Param(
+    span: Span,
+    label: Option(String),
+    pattern: Pattern,
+    annotation: Option(Type),
+  )
 }
 
-pub type CaseClause {
-  // patterns: a list of expressions (e.g., [41, 43] for `41 | 43`)
-  // guard: an empty list if no guard, or a 1-item list if there is an `if`
-  CaseClause(patterns: List(Expr), guard: List(Expr), body: Expr)
+pub type Type {
+  NamedType(span: Span, module: Option(String), name: String, args: List(Type))
+  VarType(span: Span, name: String)
+  TupleType(span: Span, elements: List(Type))
+  FnType(span: Span, params: List(Type), return: Type)
+  HoleType(span: Span, name: String)
 }
 
 pub type Statement {
-  // A function definition now contains a list of Clauses instead of just one body
-  DefStmt(
-    is_pub: Bool,
-    name: String,
-    return_type: String,
-    clauses: List(Clause),
-  )
-
-  // A return statement evaluates an expression
-  ReturnStmt(Expr)
-
-  // Just an expression floating on its own (like `42` or `user_id`)
-  ExprStmt(Expr)
-
-  // Assign a value to a variable
-  AssignStmt(pattern: Expr, value: Expr)
-
-  // Import
-  ImportStmt(path: String)
-
-  // Custom Types (Structs and Enums)
-  CustomTypeStmt(is_pub: Bool, name: String, variants: List(TypeVariant))
-
-  // Module-level constants
-  ConstStmt(is_pub: Bool, name: String, value: Expr)
-
-  // type Scores = Dict(String, Int)
-  TypeAliasStmt(is_pub: Bool, name: String, aliased_type: String)
+  /// `pattern = value`. Becomes `let` or `let assert` depending on whether
+  /// the pattern can fail.
+  Assign(span: Span, pattern: Pattern, annotation: Option(Type), value: Expr)
+  Expression(expr: Expr)
+  Return(span: Span, value: Expr)
+  /// `use a, b <- f(x)`
+  Use(span: Span, patterns: List(UsePattern), call: Expr)
+  /// `assert x == y` / `assert x as "message"`
+  Assert(span: Span, value: Expr, message: Option(Expr))
 }
 
-// A full Bea program is just a list of top-level statements
-pub type Program {
-  Program(statements: List(Statement))
+pub type UsePattern {
+  UsePattern(span: Span, pattern: Pattern, annotation: Option(Type))
+}
+
+pub type StringPart {
+  Text(raw: String, span: Span)
+  Interpolation(expr: Expr, span: Span)
+}
+
+pub type BinOp {
+  Add
+  Sub
+  Mul
+  Div
+  Rem
+  AddFloat
+  SubFloat
+  MulFloat
+  DivFloat
+  Eq
+  NotEq
+  Lt
+  LtEq
+  Gt
+  GtEq
+  LtFloat
+  LtEqFloat
+  GtFloat
+  GtEqFloat
+  Concatenate
+  And
+  Or
+  Pipe
+}
+
+pub type Arg {
+  /// `value: None` is the shorthand `label:` form.
+  Arg(span: Span, label: Option(String), value: Option(Expr))
+}
+
+pub type FnParam {
+  FnParam(span: Span, pattern: Pattern, annotation: Option(Type))
+}
+
+pub type CondClause {
+  CondClause(span: Span, condition: Expr, body: Expr)
+}
+
+pub type CaseClause {
+  /// `alternatives` is a list of `|`-separated alternatives, each holding one
+  /// pattern per case subject.
+  CaseClause(
+    span: Span,
+    alternatives: List(List(Pattern)),
+    guard: Option(Expr),
+    body: Expr,
+  )
+}
+
+pub type Segment(value) {
+  Segment(span: Span, value: value, options: List(SegmentOption(value)))
+}
+
+pub type SegmentOption(value) {
+  SegmentOption(span: Span, name: String, arg: Option(value))
+}
+
+pub type Expr {
+  Int(span: Span, text: String)
+  Float(span: Span, text: String)
+  String(span: Span, parts: List(StringPart))
+  RawString(span: Span, value: String)
+  Var(span: Span, name: String)
+  /// `Ok`, `True`, `option.Some`, `html.Text`...
+  Constructor(span: Span, module: Option(String), name: String)
+  /// `_` used as a function capture hole: `list.map(xs, f(_, 1))`
+  Hole(span: Span)
+  /// `a.b`. When `a` is an (unshadowed) imported module this is a module
+  /// access; otherwise it is record field access.
+  FieldAccess(span: Span, base: Expr, field: String, field_span: Span)
+  TupleIndex(span: Span, base: Expr, index: Int)
+  Call(span: Span, fun: Expr, args: List(Arg))
+  /// `Ctor(base | field: value)`
+  RecordUpdate(span: Span, constructor: Expr, base: Expr, updates: List(Arg))
+  Tuple(span: Span, elements: List(Expr))
+  List(span: Span, elements: List(Expr), tail: Option(Expr))
+  /// `%{k: v}` or `%{base | k: v}`
+  Map(span: Span, base: Option(Expr), pairs: List(#(Expr, Expr)))
+  Fn(
+    span: Span,
+    params: List(FnParam),
+    return_type: Option(Type),
+    body: List(Statement),
+  )
+  Block(span: Span, statements: List(Statement))
+  If(
+    span: Span,
+    condition: Expr,
+    then: List(Statement),
+    else_: Option(List(Statement)),
+  )
+  Cond(span: Span, clauses: List(CondClause))
+  Case(span: Span, subjects: List(Expr), clauses: List(CaseClause))
+  BinaryOp(span: Span, op: BinOp, left: Expr, right: Expr)
+  Negate(span: Span, value: Expr)
+  /// `-.x`, compiled to `float.negate(x)`
+  NegateFloat(span: Span, value: Expr)
+  Not(span: Span, value: Expr)
+  /// `echo x`, `echo x as "msg"`, or the pipe form `x |> echo` (value None)
+  Echo(span: Span, value: Option(Expr), message: Option(Expr))
+  /// The `?` operator
+  Try(span: Span, value: Expr)
+  Panic(span: Span, message: Option(Expr))
+  Todo(span: Span, message: Option(Expr))
+  BitArray(span: Span, segments: List(Segment(Expr)))
+}
+
+pub type PatternArg {
+  /// `value: None` is the shorthand `label:` form, which binds `label`.
+  PatternArg(span: Span, label: Option(String), value: Option(Pattern))
+}
+
+pub type Pattern {
+  PInt(span: Span, text: String)
+  PFloat(span: Span, text: String)
+  PString(span: Span, raw: String)
+  PVar(span: Span, name: String)
+  PDiscard(span: Span, name: String)
+  PTuple(span: Span, elements: List(Pattern))
+  /// `[a, b | rest]`; `tail` is `Some(PDiscard)` for `[a | _]`.
+  PList(span: Span, elements: List(Pattern), tail: Option(Pattern))
+  /// `Ctor(a, label: b | _)` — `spread` is the trailing `| _` (Gleam's `..`).
+  PConstructor(
+    span: Span,
+    module: Option(String),
+    name: String,
+    args: List(PatternArg),
+    spread: Bool,
+  )
+  /// `pattern as name`
+  PAssign(span: Span, pattern: Pattern, name: String)
+  /// `"prefix" <> rest` or `"prefix" as p <> rest`
+  PConcat(
+    span: Span,
+    prefix: String,
+    prefix_name: Option(String),
+    rest: Pattern,
+  )
+  PBitArray(span: Span, segments: List(Segment(Pattern)))
+}
+
+// --- Span accessors ---------------------------------------------------------
+
+pub fn expr_span(expr: Expr) -> Span {
+  expr.span
+}
+
+pub fn pattern_span(pattern: Pattern) -> Span {
+  pattern.span
+}
+
+pub fn type_span(t: Type) -> Span {
+  t.span
+}
+
+pub fn statement_span(statement: Statement) -> Span {
+  case statement {
+    Expression(e) -> e.span
+    Assign(span:, ..) -> span
+    Return(span:, ..) -> span
+    Use(span:, ..) -> span
+    Assert(span:, ..) -> span
+  }
+}
+
+pub fn item_span(item: Item) -> Span {
+  item.span
+}
+
+pub fn binop_to_string(op: BinOp) -> String {
+  case op {
+    Add -> "+"
+    Sub -> "-"
+    Mul -> "*"
+    Div -> "/"
+    Rem -> "%"
+    AddFloat -> "+."
+    SubFloat -> "-."
+    MulFloat -> "*."
+    DivFloat -> "/."
+    Eq -> "=="
+    NotEq -> "!="
+    Lt -> "<"
+    LtEq -> "<="
+    Gt -> ">"
+    GtEq -> ">="
+    LtFloat -> "<."
+    LtEqFloat -> "<=."
+    GtFloat -> ">."
+    GtEqFloat -> ">=."
+    Concatenate -> "<>"
+    And -> "&&"
+    Or -> "||"
+    Pipe -> "|>"
+  }
+}
+
+/// Gleam operator precedence (higher binds tighter).
+pub fn precedence(op: BinOp) -> Int {
+  case op {
+    Or -> 1
+    And -> 2
+    Eq | NotEq -> 3
+    Lt | LtEq | Gt | GtEq | LtFloat | LtEqFloat | GtFloat | GtEqFloat -> 4
+    Concatenate -> 5
+    Pipe -> 6
+    Add | Sub | AddFloat | SubFloat -> 7
+    Mul | Div | Rem | MulFloat | DivFloat -> 8
+  }
 }

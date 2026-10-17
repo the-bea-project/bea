@@ -1,0 +1,60 @@
+import gleam/io
+import gleam/list
+import gleam/result
+import gleam/string
+import simplifile
+
+pub def read_emails(path: String) -> Result(List(String), Nil) {
+  case simplifile.read(path) {
+    Ok(content) ->
+      content
+      |> string.split("\n")
+      |> list.filter(fn(email) { email != "" })
+      |> Ok
+    Error(_) -> Error(Nil)
+  }
+}
+
+pub def create_log_file(path: String) -> Result(Nil, Nil) {
+  simplifile.create_file(path)
+  |> result.replace_error(Nil)
+}
+
+pub def log_sent_email(path: String, email: String) -> Result(Nil, Nil) {
+  simplifile.append(path, email <> "\n")
+  |> result.replace_error(Nil)
+}
+
+pub def send_newsletter(
+  emails_path: String,
+  log_path: String,
+  send_email: fn(String) -> Result(Nil, Nil),
+) -> Result(Nil, Nil) {
+  create_log_file(log_path)?
+  emails = read_emails(emails_path)?
+  use email <- list.try_each(emails)
+  case send_email(email) {
+    Ok(_) -> log_sent_email(log_path, email)
+    Error(_) -> Ok(Nil)
+  }
+}
+
+pub def main() -> Nil {
+  dir = "/tmp/bea_newsletter_fixture"
+  _ = simplifile.delete(dir)
+  Ok(_) = simplifile.create_directory_all(dir)
+  Ok(Nil) = simplifile.write(dir <> "/emails.txt", "a@x.com\nb@x.com\n\nc@x.com\n")
+  send = fn(email) {
+    case string.starts_with(email, "b") {
+      True -> Error(Nil)
+      False -> Ok(Nil)
+    }
+  }
+  r = send_newsletter(dir <> "/emails.txt", dir <> "/log.txt", send)
+  io.println(string.inspect(r))
+  Ok(log) = simplifile.read(dir <> "/log.txt")
+  io.print(log)
+  nothing = io.println("io.println returns Nil")
+  io.println(string.inspect(nothing))
+  io.println(string.inspect(read_emails(dir <> "/missing.txt")))
+}

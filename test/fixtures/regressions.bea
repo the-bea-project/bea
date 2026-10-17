@@ -1,0 +1,179 @@
+// Regression tests for bugs found in review.
+import gleam/bool
+import gleam/int
+import gleam/io
+import gleam/result
+import gleam/string
+
+def log(s: String, v: a) -> a {
+  io.println(s)
+  v
+}
+
+def p(s: String) -> Result(Int, String) {
+  int.parse(s) |> result.replace_error("bad:" <> s)
+}
+
+def show(x) {
+  io.println(string.inspect(x))
+}
+
+// `?` must not reorder side effects.
+def order1() -> Result(Int, String) {
+  x = log("first", 1) + log("second", Ok(2))?
+  Ok(x)
+}
+
+def order2() -> Result(List(Int), String) {
+  Ok([log("a", 1), log("b", Error("from b"))?, log("c", Error("from c"))?])
+}
+
+def order3() -> Result(Int, String) {
+  log("piped", 1) |> int.add(log("arg", Ok(2))?) |> Ok
+}
+
+// return / ? inside assigned else-if and cond chains
+def chain_cond(n: Int) -> String {
+  label = cond {
+    n > 10 -> "big"
+    n < 0 -> {
+      return "negative"
+    }
+    _ -> "small"
+  }
+  "label: " <> label
+}
+
+def chain_try(s: String, n: Int) -> Result(Int, String) {
+  r = if n > 0 {
+    1
+  } else if n < 0 {
+    p(s)?
+  } else {
+    2
+  }
+  Ok(r * 2)
+}
+
+def chain_case(n: Int) -> Int {
+  r = if n > 0 {
+    1
+  } else {
+    case n {
+      -5 -> {
+        return 0
+      }
+      _ -> 2
+    }
+  }
+  r * 2
+}
+
+// `?` nested inside expressions
+def nested_and(a: String, flag: Bool) -> Result(Bool, String) {
+  Ok(flag and p(a)? > 0)
+}
+
+def nested_if(a: String, flag: Bool) -> Result(String, String) {
+  Ok(
+    int.to_string(if flag {
+      p(a)?
+    } else {
+      0
+    }),
+  )
+}
+
+def nested_block(s: String) -> Result((Int, Int), String) {
+  Ok((p(s)?, {
+    z = p(s)?
+    z * 2
+  }))
+}
+
+def return_in_arg(n: Int) -> String {
+  int.to_string(if n > 0 {
+    n
+  } else {
+    return "non-positive"
+  })
+}
+
+// The message of an assert is only evaluated when the assert fails.
+def msg() -> Result(String, String) {
+  io.println("msg evaluated")
+  Error("msg failed")
+}
+
+def asserting(x: Int) -> Result(Int, String) {
+  assert x > 0 as msg()?
+  Ok(x)
+}
+
+// Bea keywords as Gleam names
+def keywords(x: Int) -> Int {
+  use <- bool.guard(when: x > 3, return: 0)
+  case bool.and(True, False) || bool.or(True, False) {
+    True -> x * 2
+    False -> x
+  }
+}
+
+// `?` before a field access in a pipeline
+pub type U {
+  U(name: String)
+}
+
+def mk(s: String) -> Result(U, String) {
+  Ok(U(s))
+}
+
+def piped_field(s: String) -> Result(String, String) {
+  c = s |> mk()?.name
+  Ok(c)
+}
+
+// User names starting with `bea_` are ordinary names.
+def user_bea_names(x: Int) -> Int {
+  bea_v = 1
+  r = case x {
+    0 -> {
+      return 0
+    }
+    bea_v -> bea_v * 10
+  }
+  r + bea_v
+}
+
+// Float negation and minus at line starts inside brackets
+def negation(x: Float) -> (Float, Int) {
+  (-.x, -(3)
+  - 1)
+}
+
+def bare_return(x: Int) -> Nil {
+  if x > 0 {
+    return
+  }
+  io.println("x is not positive")
+}
+
+pub def main() {
+  show(order1())
+  show(order2())
+  show(order3())
+  show([chain_cond(11), chain_cond(-1), chain_cond(3)])
+  show(#(chain_try("x", 1), chain_try("x", -1), chain_try("3", -1), chain_try("x", 0)))
+  show(#(chain_case(1), chain_case(-5), chain_case(-1)))
+  show(#(nested_and("z", False), nested_and("z", True), nested_and("1", True)))
+  show(#(nested_if("7", True), nested_if("q", True), nested_if("q", False)))
+  show(#(nested_block("2"), nested_block("t")))
+  show(#(return_in_arg(4), return_in_arg(-4)))
+  show(asserting(1))
+  show(#(keywords(1), keywords(5)))
+  show(piped_field("bea"))
+  show(user_bea_names(5))
+  show(negation(1.5))
+  bare_return(1)
+  bare_return(0)
+}

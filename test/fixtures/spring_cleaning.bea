@@ -1,0 +1,24 @@
+import gleam/io
+import gleam/string
+
+pub def extract_error(problem: Result(a, b)) -> b {
+  Error(e) = problem
+  e
+}
+
+pub def remove_team_prefix(team: String) -> String {
+  "Team " <> rest = team
+  rest
+}
+
+pub def split_region_and_team(combined: String) -> (String, String) {
+  [region, "Team " <> team] = string.split(combined, ",")
+  (region, team)
+}
+
+pub def main() {
+  io.println(extract_error(Error("oops")))
+  io.println(remove_team_prefix("Team Rocket"))
+  (region, team) = split_region_and_team("Kanto,Team Rocket")
+  io.println(region <> "/" <> team)
+}

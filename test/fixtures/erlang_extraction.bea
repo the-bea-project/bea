@@ -1,0 +1,39 @@
+import gleam/io
+import gleam/string
+
+pub type GbTree(k, v)
+
+@external(erlang, "gb_trees", "empty")
+pub def new_gb_tree() -> GbTree(k, v)
+
+pub def insert(tree: GbTree(k, v), key: k, value: v) -> GbTree(k, v) {
+  do_insert(key, value, tree)
+}
+
+@external(erlang, "gb_trees", "insert")
+def do_insert(key: k, value: v, tree: GbTree(k, v)) -> GbTree(k, v)
+
+pub def delete(tree: GbTree(k, v), key: k) -> GbTree(k, v) {
+  do_delete(key, tree)
+}
+
+@external(erlang, "gb_trees", "delete_any")
+def do_delete(key: k, tree: GbTree(k, v)) -> GbTree(k, v)
+
+@external(erlang, "gb_trees", "to_list")
+pub def to_list(tree: GbTree(k, v)) -> List((k, v))
+
+/// Implemented in the project's own Erlang file, `extraction_ffi.erl`.
+@external(erlang, "extraction_ffi", "shout")
+pub def shout(text: String) -> String
+
+pub def main() {
+  tree =
+    new_gb_tree()
+    |> insert(2, "b")
+    |> insert(1, "a")
+    |> insert(3, "c")
+    |> delete(2)
+  io.println(string.inspect(to_list(tree)))
+  io.println(shout("ffi works"))
+}

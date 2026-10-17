@@ -1,0 +1,52 @@
+import gleam/int
+import gleam/io
+import gleam/result
+import gleam/string
+
+pub def with_retry(experiment: fn() -> Result(t, e)) -> Result(t, e) {
+  experiment()
+  |> result.lazy_or(experiment)
+}
+
+pub def record_timing(
+  time_logger: fn() -> Nil,
+  experiment: fn() -> Result(t, e),
+) -> Result(t, e) {
+  time_logger()
+  result = experiment()
+  time_logger()
+  result
+}
+
+pub def run_experiment(
+  name: String,
+  setup: fn() -> Result(t, e),
+  action: fn(t) -> Result(u, e),
+  record: fn(t, u) -> Result(v, e),
+) -> Result((String, v), e) {
+  use setup_data <- result.try(setup())
+  use action_data <- result.try(action(setup_data))
+  use record_data <- result.try(record(setup_data, action_data))
+  Ok((name, record_data))
+}
+
+// `result` is a local variable above, so the `?` helper must not be
+// referenced as `result.try` in this module.
+pub def sum(a: String, b: String) -> Result(Int, Nil) {
+  result = int.parse(a)?
+  Ok(result + int.parse(b)?)
+}
+
+pub def main() {
+  io.println(string.inspect(with_retry(fn() { Error("first") })))
+  r = record_timing(fn() { io.println("tick") }, fn() { Ok(1) })
+  io.println(string.inspect(r))
+  io.println(string.inspect(run_experiment(
+    "exp",
+    fn() { Ok(1) },
+    fn(x) { Ok(x + 1) },
+    fn(a, b) { Ok(a * 10 + b) },
+  )))
+  io.println(string.inspect(sum("2", "3")))
+  io.println(string.inspect(sum("2", "x")))
+}

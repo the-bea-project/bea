@@ -1,0 +1,81 @@
+import gleam/int
+import gleam/io
+import gleam/list
+import gleam/result
+import gleam/string
+
+def parse(s: String) -> Result(Int, String) {
+  int.parse(s) |> result.replace_error("bad: " <> s)
+}
+
+def add(a: String, b: String) -> Result(Int, String) {
+  x = parse(a)?
+  y = parse(b)?
+  Ok(x + y)
+}
+
+def sum_all(xs: List(String)) -> Result(Int, String) {
+  total = list.try_fold(xs, 0, fn(acc, s) { Ok(acc + parse(s)?) })?
+  Ok(total)
+}
+
+// `?` after a pipeline applies to the whole pipeline.
+def piped(s: String) -> Result(Int, String) {
+  n = s |> string.trim() |> parse()?
+  Ok(n * 2)
+}
+
+// The right side of `and` must not run (or fail) when the left is False.
+def short(flag: Bool, s: String) -> Result(Bool, String) {
+  ok = flag and parse(s)? > 0
+  Ok(ok)
+}
+
+def in_cond(s: String) -> Result(String, String) {
+  r = cond {
+    s == "" -> "empty"
+    parse(s)? > 10 -> "big"
+    _ -> "small"
+  }
+  Ok(r)
+}
+
+def split(s: String) -> Result((Int, Int), String) {
+  case string.split(s, ",") {
+    [a, b] -> Ok((parse(a)?, parse(b)?))
+    _ -> Error("expected a,b")
+  }
+}
+
+def tuple_dest(s: String) -> Result(Int, String) {
+  (a, b) = split(s)?
+  Ok(a + b)
+}
+
+def nested(s: String) -> Result(Int, String) {
+  Ok(int.max(parse(s)?, 0) + 1)
+}
+
+def show(r: Result(a, String), f: fn(a) -> String) -> String {
+  case r {
+    Ok(v) -> "Ok(" <> f(v) <> ")"
+    Error(e) -> "Error(" <> e <> ")"
+  }
+}
+
+pub def main() {
+  io.println(show(add("1", "2"), int.to_string))
+  io.println(show(add("1", "x"), int.to_string))
+  io.println(show(sum_all(["1", "2", "3"]), int.to_string))
+  io.println(show(sum_all(["1", "?", "3"]), int.to_string))
+  io.println(show(piped("  21 "), int.to_string))
+  io.println(show(short(False, "nope"), string.inspect))
+  io.println(show(short(True, "5"), string.inspect))
+  io.println(show(short(True, "nope"), string.inspect))
+  io.println(show(in_cond(""), fn(x) { x }))
+  io.println(show(in_cond("50"), fn(x) { x }))
+  io.println(show(in_cond("z"), fn(x) { x }))
+  io.println(show(tuple_dest("3,4"), int.to_string))
+  io.println(show(tuple_dest("3"), int.to_string))
+  io.println(show(nested("-7"), int.to_string))
+}

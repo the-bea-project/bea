@@ -1,50 +1,75 @@
-import gleam/float
-import gleam/int
+//// The Bea lexer.
+////
+//// Works directly on the UTF-8 bytes of the source so every token carries an
+//// exact byte span. Comments are not discarded: they are returned separately
+//// so the formatter can put them back and doc comments can be forwarded to
+//// the generated Gleam (which makes them show up in hovers).
+
+import bea/diagnostic.{type Diagnostic}
+import bea/span.{type Span, Span}
+import gleam/bit_array
 import gleam/list
 import gleam/string
 
-// src/bea/lexer.gleam
-
-pub type Token {
-  // --- Keywords & Visibility ---
+pub type Kind {
+  // Keywords
   Import
   As
   Pub
   Def
   Fn
   Type
+  Opaque
   Const
-
-  // --- Bool Ops ---
-  And
-  Or
-  Not
-
-  // --- Control Flow ---
   If
   Else
   Cond
   Case
   Return
-  Loop
-  Break
-  Continue
-
-  // --- Debugging & Misc ---
+  Use
   Echo
   Todo
   Panic
+  Assert
+  And
+  Or
+  Not
 
-  // Membership
-  In
+  // Grouping
+  LParen
+  RParen
+  LBrace
+  RBrace
+  LBracket
+  RBracket
+  LtLt
+  GtGt
 
-  // --- Operators & Symbols ---
-  Bang
+  // Punctuation
+  Comma
+  Colon
+  Dot
+  DotDot
+  Question
+  At
+  Hash
+  Pipe
+  PipeRight
+  Arrow
+  LArrow
+
+  // Operators
   Eq
+  EqEq
+  NotEq
   Less
   LessEq
   Greater
   GreaterEq
+  LessDot
+  LessEqDot
+  GreaterDot
+  GreaterEqDot
   Plus
   Minus
   Star
@@ -54,330 +79,772 @@ pub type Token {
   MinusDot
   StarDot
   SlashDot
-  PipeRight
-  Caret
-  Question
-  Pipe
-  Colon
-  Hash
-  Ampersand
-  Underscore
-  Comma
-  Dot
-  Arrow
-  EqEq
-  BangEq
   Concat
+  Bang
+  AmpAmp
+  PipePipe
 
-  // --- Delimiters ---
-  LBrace
-  RBrace
-  LBracket
-  RBracket
-  LParen
-  RParen
+  // Literals and names
+  Int(String)
+  Float(String)
+  Str(List(StrPart))
+  RawStr(String)
+  Name(String)
+  UpName(String)
+  Underscore
 
-  // --- Literals & Identifiers ---
-  StringLit(String)
-  CharLit(String)
-  RawStringLit(String)
-  IntLit(Int)
-  FloatLit(Float)
-  Ident(String)
-  // e.g., variable_name, function_name
-  TypeIdent(String)
-
-  // e.g., Ok, Error, User (capitalized)
   Eof
 }
 
-// An easy way to lex a string in Gleam is to convert it
-// into a list of graphemes (characters) and use pattern
-// matching to recursively chew through them one by one.
-pub fn tokenize(source: String) -> List(Token) {
-  // Convert a raw string into a list of individual characters
-  let chars = string.to_graphemes(source)
-
-  // Start the recursive scanner with an empty token list
-  scan(chars, [])
+/// A string literal is a list of parts. Text parts hold the *raw* (still
+/// escaped) source text, which is valid Gleam string content once `\#` is
+/// unescaped. Code parts hold the tokens of an `#{...}` interpolation.
+pub type StrPart {
+  StrText(raw: String, span: Span)
+  StrCode(tokens: List(Token), span: Span)
 }
 
-fn scan(chars: List(String), tokens: List(Token)) {
-  case chars {
-    // Base case: End of file. Prepend Eof and reverse the list.
-    [] -> list.reverse([Eof, ..tokens])
-    // Whitespace: Ignore and keep scanning
-    [" ", ..rest] | ["\n", ..rest] | ["\t", ..rest] | ["\r", ..rest] ->
-      scan(rest, tokens)
+pub type Token {
+  /// `nl_before` is true when at least one newline separates this token from
+  /// the previous one. The parser uses it to decide where statements end.
+  Token(kind: Kind, span: Span, nl_before: Bool)
+}
 
-    // Arrow
-    ["-", ">", ..rest] -> scan(rest, [Arrow, ..tokens])
+pub type CommentKind {
+  Regular
+  Doc
+  ModuleDoc
+}
 
-    // Two-character operators
-    ["<", ">", ..rest] -> scan(rest, [Concat, ..tokens])
-    ["|", ">", ..rest] -> scan(rest, [PipeRight, ..tokens])
-    ["!", "=", ..rest] -> scan(rest, [BangEq, ..tokens])
-    ["=", "=", ..rest] -> scan(rest, [EqEq, ..tokens])
-    [">", "=", ..rest] -> scan(rest, [GreaterEq, ..tokens])
-    ["<", "=", ..rest] -> scan(rest, [LessEq, ..tokens])
+pub type Comment {
+  Comment(kind: CommentKind, text: String, span: Span)
+}
 
-    ["+", ".", ..rest] -> scan(rest, [PlusDot, ..tokens])
-    ["-", ".", ..rest] -> scan(rest, [MinusDot, ..tokens])
-    ["*", ".", ..rest] -> scan(rest, [StarDot, ..tokens])
-    ["/", ".", ..rest] -> scan(rest, [SlashDot, ..tokens])
+pub type Lexed {
+  Lexed(tokens: List(Token), comments: List(Comment), errors: List(Diagnostic))
+}
 
-    // Comments: intercept // and throw away the rest of the line
-    ["/", "/", ..rest] -> consume_comment(rest, tokens)
+pub fn lex(source: String) -> Lexed {
+  let src = bit_array.from_string(source)
+  let st = scan(State(src, [], [], []), src, 0, True)
+  Lexed(
+    tokens: insignificant_newlines(list.reverse(st.tokens), [], []),
+    comments: list.reverse(st.comments),
+    errors: list.reverse(st.errors),
+  )
+}
 
-    // Single-character symbols
-    ["(", ..rest] -> scan(rest, [LParen, ..tokens])
-    [")", ..rest] -> scan(rest, [RParen, ..tokens])
-    ["{", ..rest] -> scan(rest, [LBrace, ..tokens])
-    ["}", ..rest] -> scan(rest, [RBrace, ..tokens])
-    // Lower precendence single-character symbols
-    ["+", ..rest] -> scan(rest, [Plus, ..tokens])
-    ["-", ..rest] -> scan(rest, [Minus, ..tokens])
-    ["!", ..rest] -> scan(rest, [Bang, ..tokens])
-    ["=", ..rest] -> scan(rest, [Eq, ..tokens])
-    ["<", ..rest] -> scan(rest, [Less, ..tokens])
-    [">", ..rest] -> scan(rest, [Greater, ..tokens])
-    ["*", ..rest] -> scan(rest, [Star, ..tokens])
-    ["/", ..rest] -> scan(rest, [Slash, ..tokens])
-    ["%", ..rest] -> scan(rest, [Percent, ..tokens])
-    ["^", ..rest] -> scan(rest, [Caret, ..tokens])
-    ["?", ..rest] -> scan(rest, [Question, ..tokens])
-    ["|", ..rest] -> scan(rest, [Pipe, ..tokens])
-    // Must come AFTER PipeRight
-    [":", ..rest] -> scan(rest, [Colon, ..tokens])
-    ["#", ..rest] -> scan(rest, [Hash, ..tokens])
-    ["&", ..rest] -> scan(rest, [Ampersand, ..tokens])
-    [",", ..rest] -> scan(rest, [Comma, ..tokens])
-    [".", ..rest] -> scan(rest, [Dot, ..tokens])
-    ["[", ..rest] -> scan(rest, [LBracket, ..tokens])
-    ["]", ..rest] -> scan(rest, [RBracket, ..tokens])
-
-    // Strings, Chars, and Raw Strings
-    ["\"", ..rest] -> consume_string(rest, "\"", "", StringLit, tokens)
-    ["'", ..rest] -> consume_string(rest, "'", "", CharLit, tokens)
-    ["`", ..rest] -> consume_string(rest, "`", "", RawStringLit, tokens)
-    // Catch-all for Identifiers, Keywords, and Numbers
-    [char, ..rest] -> {
-      case is_alpha(char) || char == "_" {
-        True -> consume_ident(rest, char, tokens)
-        False -> {
-          case is_digit(char) {
-            // PASS `False` HERE (meaning: no dot seen yet)
-            True -> consume_number(rest, char, False, tokens)
-            False -> {
-              // Unrecognized character (skip it for now)
-              scan(rest, tokens)
-            }
+/// Inside `(...)`, `[...]` and `<<...>>` newlines can't end a statement, so a
+/// `-` at the start of a line there is a subtraction, not a new expression.
+fn insignificant_newlines(
+  tokens: List(Token),
+  stack: List(Kind),
+  acc: List(Token),
+) -> List(Token) {
+  case tokens {
+    [] -> list.reverse(acc)
+    [t, ..rest] -> {
+      let stack = case t.kind {
+        LParen | LBracket | LtLt | LBrace -> [t.kind, ..stack]
+        RParen | RBracket | GtGt | RBrace ->
+          case stack {
+            [_, ..s] -> s
+            [] -> []
           }
+        _ -> stack
+      }
+      let t = case t.kind, stack {
+        Minus, [LParen, ..] | Minus, [LBracket, ..] | Minus, [LtLt, ..] ->
+          Token(..t, nl_before: False)
+        MinusDot, [LParen, ..] | MinusDot, [LBracket, ..] ->
+          Token(..t, nl_before: False)
+        _, _ -> t
+      }
+      insignificant_newlines(rest, stack, [t, ..acc])
+    }
+  }
+}
+
+/// Kept for backwards compatibility with older callers/tests: just the kinds.
+pub fn tokenize(source: String) -> List(Kind) {
+  lex(source).tokens |> list.map(fn(t) { t.kind })
+}
+
+type State {
+  State(
+    src: BitArray,
+    tokens: List(Token),
+    comments: List(Comment),
+    errors: List(Diagnostic),
+  )
+}
+
+fn push(st: State, kind: Kind, start: Int, end: Int, nl: Bool) -> State {
+  State(..st, tokens: [Token(kind, Span(start, end), nl), ..st.tokens])
+}
+
+fn err(st: State, title: String, start: Int, end: Int, label: String) -> State {
+  State(..st, errors: [
+    diagnostic.error(title, Span(start, end), label),
+    ..st.errors
+  ])
+}
+
+fn scan(st: State, rest: BitArray, pos: Int, nl: Bool) -> State {
+  case rest {
+    <<>> -> push(st, Eof, pos, pos, nl)
+
+    <<"\n", r:bytes>> -> scan(st, r, pos + 1, True)
+    <<" ", r:bytes>> | <<"\t", r:bytes>> | <<"\r", r:bytes>> ->
+      scan(st, r, pos + 1, nl)
+
+    // Comments
+    <<"////", r:bytes>> -> comment(st, r, pos, pos + 4, ModuleDoc)
+    <<"///", r:bytes>> -> comment(st, r, pos, pos + 3, Doc)
+    <<"//", r:bytes>> -> comment(st, r, pos, pos + 2, Regular)
+
+    // Three character operators
+    <<"<=.", r:bytes>> -> op(st, r, pos, 3, LessEqDot, nl)
+    <<">=.", r:bytes>> -> op(st, r, pos, 3, GreaterEqDot, nl)
+
+    // Two character operators
+    <<"->", r:bytes>> -> op(st, r, pos, 2, Arrow, nl)
+    <<"<-", r:bytes>> -> op(st, r, pos, 2, LArrow, nl)
+    <<"<>", r:bytes>> -> op(st, r, pos, 2, Concat, nl)
+    <<"<<", r:bytes>> -> op(st, r, pos, 2, LtLt, nl)
+    <<">>", r:bytes>> -> op(st, r, pos, 2, GtGt, nl)
+    <<"|>", r:bytes>> -> op(st, r, pos, 2, PipeRight, nl)
+    <<"||", r:bytes>> -> op(st, r, pos, 2, PipePipe, nl)
+    <<"&&", r:bytes>> -> op(st, r, pos, 2, AmpAmp, nl)
+    <<"!=", r:bytes>> -> op(st, r, pos, 2, NotEq, nl)
+    <<"==", r:bytes>> -> op(st, r, pos, 2, EqEq, nl)
+    <<">=", r:bytes>> -> op(st, r, pos, 2, GreaterEq, nl)
+    <<"<=", r:bytes>> -> op(st, r, pos, 2, LessEq, nl)
+    <<"<.", r:bytes>> -> op(st, r, pos, 2, LessDot, nl)
+    <<">.", r:bytes>> -> op(st, r, pos, 2, GreaterDot, nl)
+    <<"+.", r:bytes>> -> op(st, r, pos, 2, PlusDot, nl)
+    <<"-.", r:bytes>> -> op(st, r, pos, 2, MinusDot, nl)
+    <<"*.", r:bytes>> -> op(st, r, pos, 2, StarDot, nl)
+    <<"/.", r:bytes>> -> op(st, r, pos, 2, SlashDot, nl)
+    <<"..", r:bytes>> -> op(st, r, pos, 2, DotDot, nl)
+
+    // Single character tokens
+    <<"(", r:bytes>> -> op(st, r, pos, 1, LParen, nl)
+    <<")", r:bytes>> -> op(st, r, pos, 1, RParen, nl)
+    <<"{", r:bytes>> -> op(st, r, pos, 1, LBrace, nl)
+    <<"}", r:bytes>> -> op(st, r, pos, 1, RBrace, nl)
+    <<"[", r:bytes>> -> op(st, r, pos, 1, LBracket, nl)
+    <<"]", r:bytes>> -> op(st, r, pos, 1, RBracket, nl)
+    <<",", r:bytes>> -> op(st, r, pos, 1, Comma, nl)
+    <<":", r:bytes>> -> op(st, r, pos, 1, Colon, nl)
+    <<".", r:bytes>> -> op(st, r, pos, 1, Dot, nl)
+    <<"?", r:bytes>> -> op(st, r, pos, 1, Question, nl)
+    <<"@", r:bytes>> -> op(st, r, pos, 1, At, nl)
+    <<"#", r:bytes>> -> op(st, r, pos, 1, Hash, nl)
+    <<"|", r:bytes>> -> op(st, r, pos, 1, Pipe, nl)
+    <<"=", r:bytes>> -> op(st, r, pos, 1, Eq, nl)
+    <<"<", r:bytes>> -> op(st, r, pos, 1, Less, nl)
+    <<">", r:bytes>> -> op(st, r, pos, 1, Greater, nl)
+    <<"+", r:bytes>> -> op(st, r, pos, 1, Plus, nl)
+    <<"-", r:bytes>> -> op(st, r, pos, 1, Minus, nl)
+    <<"*", r:bytes>> -> op(st, r, pos, 1, Star, nl)
+    <<"/", r:bytes>> -> op(st, r, pos, 1, Slash, nl)
+    <<"%", r:bytes>> -> op(st, r, pos, 1, Percent, nl)
+    <<"!", r:bytes>> -> op(st, r, pos, 1, Bang, nl)
+
+    <<"\"", r:bytes>> -> {
+      let #(st, r, end, parts) = string_literal(st, r, pos + 1, pos + 1, [])
+      scan(push(st, Str(parts), pos, end, nl), r, end, False)
+    }
+
+    <<"`", r:bytes>> -> raw_string(st, r, pos, pos + 1, nl)
+
+    // Single quoted strings aren't Bea syntax; report once and lex the
+    // content as a string so parsing can carry on.
+    <<"'", r:bytes>> -> {
+      let len = single_quoted_length(r, 0)
+      let closed = case drop(r, len) {
+        <<"'", _:bytes>> -> 1
+        _ -> 0
+      }
+      let end = pos + 1 + len + closed
+      let content = slice(st.src, pos + 1, len)
+      let st =
+        State(..st, errors: [
+          diagnostic.error(
+            "Single quoted string",
+            Span(pos, end),
+            "Bea strings use double quotes",
+          )
+            |> diagnostic.with_hint("Write \"" <> content <> "\" instead."),
+          ..st.errors
+        ])
+      let st =
+        push(
+          st,
+          Str([StrText(content, Span(pos + 1, pos + 1 + len))]),
+          pos,
+          end,
+          nl,
+        )
+      scan(st, drop(r, len + closed), end, False)
+    }
+
+    <<c, r:bytes>> -> {
+      case is_digit(c), is_name_start(c) {
+        True, _ -> number(st, rest, pos, nl)
+        _, True -> {
+          let len = name_length(r, 1)
+          let text = slice(st.src, pos, len)
+          let kind = keyword_or_name(text)
+          scan(
+            push(st, kind, pos, pos + len, nl),
+            drop(rest, len),
+            pos + len,
+            False,
+          )
+        }
+        _, _ -> {
+          // Unknown (possibly multi-byte) character: report and skip it.
+          let width = utf8_width(c)
+          let st =
+            err(
+              st,
+              "Unexpected character",
+              pos,
+              pos + width,
+              "I don't know what this character means",
+            )
+          scan(st, drop(rest, width), pos + width, nl)
         }
       }
     }
+
+    _ -> push(st, Eof, pos, pos, nl)
   }
 }
 
-// Helper to consume characters until the matching quote is found
-fn consume_string(
-  chars: List(String),
-  delimiter: String,
-  acc: String,
-  wrapper: fn(String) -> Token,
-  tokens: List(Token),
-) -> List(Token) {
-  case chars {
-    [] -> list.reverse([Eof, wrapper(acc), ..tokens])
+fn op(st: State, rest: BitArray, pos: Int, len: Int, kind: Kind, nl: Bool) {
+  scan(push(st, kind, pos, pos + len, nl), rest, pos + len, False)
+}
 
-    // Found closing quote
-    [char, ..rest] if char == delimiter -> {
-      scan(rest, [wrapper(acc), ..tokens])
-    }
+fn comment(st: State, rest: BitArray, start: Int, pos: Int, kind: CommentKind) {
+  let len = line_length(rest, 0)
+  let text = slice(st.src, pos, len)
+  let st =
+    State(..st, comments: [
+      Comment(kind, text, Span(start, pos + len)),
+      ..st.comments
+    ])
+  // The newline itself is left for `scan`, so `nl_before` is set correctly.
+  scan(st, drop(rest, len), pos + len, True)
+}
 
-    ["#", "{", ..rest] if delimiter == "\"" -> {
-      // 1. Extract the characters of the expression inside #{ }
-      let #(inner_chars, after_brace) = extract_until_brace(rest, 0, [])
-
-      // 2. Recursively lex the inner expression
-      let inner_tokens = scan(inner_chars, [])
-
-      // 3. scan() returns the tokens in order ending with Eof. 
-      // We reverse them and drop the Eof so we can inject them into our token stream.
-      let inner_no_eof = case list.reverse(inner_tokens) {
-        [Eof, ..rest_inner] -> rest_inner
-        other -> other
-      }
-
-      // 4. Stitch it together: `acc` <> `inner_expression` <> `...rest of string`
-      let t1 = [wrapper(acc), ..tokens]
-      let t2 = [Concat, ..t1]
-      let t3 = list.append(inner_no_eof, t2)
-      let t4 = [Concat, ..t3]
-
-      // Resume consuming the rest of the string with an empty accumulator
-      consume_string(after_brace, delimiter, "", wrapper, t4)
-    }
-
-    // Normal character (including a `#` that isn't followed by `{`)
-    [char, ..rest] ->
-      consume_string(rest, delimiter, acc <> char, wrapper, tokens)
+fn line_length(rest: BitArray, acc: Int) -> Int {
+  case rest {
+    <<"\n", _:bytes>> | <<>> -> acc
+    <<_, r:bytes>> -> line_length(r, acc + 1)
+    _ -> acc
   }
 }
 
-// Helper to grab characters until we find the closing `}`
-fn extract_until_brace(
-  chars: List(String),
-  depth: Int,
-  acc: List(String),
-) -> #(List(String), List(String)) {
-  case chars {
-    [] -> #(list.reverse(acc), [])
-    // Reached EOF safely
-    ["{", ..rest] -> extract_until_brace(rest, depth + 1, ["{", ..acc])
-    ["}", ..rest] -> {
-      case depth == 0 {
-        True -> #(list.reverse(acc), rest)
-        False -> extract_until_brace(rest, depth - 1, ["}", ..acc])
-      }
-    }
-    [char, ..rest] -> extract_until_brace(rest, depth, [char, ..acc])
-  }
-}
-
-fn consume_ident(
-  chars: List(String),
-  acc: String,
-  tokens: List(Token),
-) -> List(Token) {
-  case chars {
-    // If the next character is alphanumeric, keep building the identifier
-    [char, ..rest] -> {
-      case is_alphanum(char) {
-        True -> consume_ident(rest, acc <> char, tokens)
-        False -> scan(chars, [match_keyword(acc), ..tokens])
-      }
-    }
-    // End of file reached while parsing identifier
-    [] -> list.reverse([Eof, match_keyword(acc), ..tokens])
-  }
-}
-
-fn match_keyword(word: String) -> Token {
-  case word {
+fn keyword_or_name(text: String) -> Kind {
+  case text {
     "import" -> Import
     "as" -> As
     "pub" -> Pub
     "def" -> Def
     "fn" -> Fn
     "type" -> Type
+    "opaque" -> Opaque
     "const" -> Const
     "if" -> If
     "else" -> Else
     "cond" -> Cond
     "case" -> Case
-    "and" -> And
-    "or" -> Or
-    "not" -> Not
     "return" -> Return
-    "loop" -> Loop
-    "break" -> Break
-    "continue" -> Continue
+    "use" -> Use
     "echo" -> Echo
     "todo" -> Todo
     "panic" -> Panic
-    "in" -> In
+    "assert" -> Assert
+    "and" -> And
+    "or" -> Or
+    "not" -> Not
     "_" -> Underscore
-    _ -> {
-      // Check if the first letter is uppercase for TypeIdent
-      let first_char = string.slice(word, 0, 1)
-      let is_upper = string.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", first_char)
-      case is_upper {
-        True -> TypeIdent(word)
-        False -> Ident(word)
+    _ ->
+      case text {
+        "A" <> _
+        | "B" <> _
+        | "C" <> _
+        | "D" <> _
+        | "E" <> _
+        | "F" <> _
+        | "G" <> _
+        | "H" <> _
+        | "I" <> _
+        | "J" <> _
+        | "K" <> _
+        | "L" <> _
+        | "M" <> _
+        | "N" <> _
+        | "O" <> _
+        | "P" <> _
+        | "Q" <> _
+        | "R" <> _
+        | "S" <> _
+        | "T" <> _
+        | "U" <> _
+        | "V" <> _
+        | "W" <> _
+        | "X" <> _
+        | "Y" <> _
+        | "Z" <> _ -> UpName(text)
+        _ -> Name(text)
       }
-    }
   }
 }
 
-fn is_alpha(char: String) -> Bool {
-  string.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", char)
-}
+// --- Numbers ---------------------------------------------------------------
 
-fn is_alphanum(char: String) -> Bool {
-  string.contains(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
-    char,
-  )
-}
-
-fn consume_number(
-  chars: List(String),
-  acc: String,
-  has_dot: Bool,
-  tokens: List(Token),
-) -> List(Token) {
-  case chars {
-    // Ignore underscores so we can parse numbers like 1_000_000
-    ["_", ..rest] -> consume_number(rest, acc, has_dot, tokens)
-    [char, ..rest] -> {
-      case is_digit(char) {
-        // Still a digit, keep consuming
-        True -> consume_number(rest, acc <> char, has_dot, tokens)
-
-        // Not a digit. Is it the first dot we've seen?
+fn number(st: State, rest: BitArray, pos: Int, nl: Bool) -> State {
+  let after_dot = case st.tokens {
+    [Token(Dot, _, _), ..] -> True
+    _ -> False
+  }
+  let #(len, is_float) = case rest {
+    <<"0x", r:bytes>> | <<"0X", r:bytes>> -> #(2 + count(r, is_hex, 0), False)
+    <<"0o", r:bytes>> | <<"0O", r:bytes>> -> #(2 + count(r, is_octal, 0), False)
+    <<"0b", r:bytes>> | <<"0B", r:bytes>> -> #(
+      2 + count(r, is_binary, 0),
+      False,
+    )
+    _ -> {
+      let int_len = count(rest, is_digit_or_underscore, 0)
+      // `tuple.0.1` must lex as two integer indexes, not a float.
+      case after_dot {
+        True -> #(int_len, False)
         False -> {
-          case char == "." && !has_dot {
-            // It's a dot! Keep consuming, but flip has_dot to True
-            True -> consume_number(rest, acc <> char, True, tokens)
-
-            // It's not a dot (or it's a second dot). We are done.
-            False -> {
-              case has_dot {
-                True -> {
-                  let assert Ok(val) = float.parse(acc)
-                  scan(chars, [FloatLit(val), ..tokens])
-                }
-                False -> {
-                  let assert Ok(val) = int.parse(acc)
-                  scan(chars, [IntLit(val), ..tokens])
-                }
+          case drop(rest, int_len) {
+            <<".", c, _:bytes>> if c >= 48 && c <= 57 -> {
+              let frac =
+                count(drop(rest, int_len + 1), is_digit_or_underscore, 0)
+              let base = int_len + 1 + frac
+              #(base + exponent(drop(rest, base)), True)
+            }
+            // `1.` is a valid float as long as it isn't followed by a name
+            // or another dot.
+            <<".", c, _:bytes>> -> {
+              case is_name_start(c) || c == 46 {
+                True -> #(int_len, False)
+                False -> #(int_len + 1, True)
               }
             }
+            <<".">> -> #(int_len + 1, True)
+            _ -> #(int_len, False)
           }
         }
       }
     }
+  }
+  let text = slice(st.src, pos, len)
+  let kind = case is_float {
+    True -> Float(text)
+    False -> Int(text)
+  }
+  scan(push(st, kind, pos, pos + len, nl), drop(rest, len), pos + len, False)
+}
 
-    // Reached the end of the file
-    [] -> {
-      case has_dot {
-        True -> {
-          let assert Ok(val) = float.parse(acc)
-          list.reverse([Eof, FloatLit(val), ..tokens])
+fn exponent(rest: BitArray) -> Int {
+  case rest {
+    <<"e-", c, _:bytes>> | <<"E-", c, _:bytes>> if c >= 48 && c <= 57 ->
+      2 + count(drop(rest, 2), is_digit_or_underscore, 0)
+    <<"e", c, _:bytes>> | <<"E", c, _:bytes>> if c >= 48 && c <= 57 ->
+      1 + count(drop(rest, 1), is_digit_or_underscore, 0)
+    _ -> 0
+  }
+}
+
+fn count(rest: BitArray, pred: fn(Int) -> Bool, acc: Int) -> Int {
+  case rest {
+    <<c, r:bytes>> ->
+      case pred(c) {
+        True -> count(r, pred, acc + 1)
+        False -> acc
+      }
+    _ -> acc
+  }
+}
+
+// --- Strings ---------------------------------------------------------------
+
+/// Scans a string body after the opening quote. Returns the new state, the
+/// remaining input, the offset just past the closing quote and the parts.
+fn string_literal(
+  st: State,
+  rest: BitArray,
+  text_start: Int,
+  pos: Int,
+  parts: List(StrPart),
+) -> #(State, BitArray, Int, List(StrPart)) {
+  case rest {
+    <<>> -> {
+      let st =
+        err(
+          st,
+          "Unterminated string",
+          text_start - 1,
+          pos,
+          "this string is never closed",
+        )
+      let parts = add_text(st, parts, text_start, pos)
+      #(st, rest, pos, list.reverse(parts))
+    }
+    <<"\"", r:bytes>> -> {
+      let parts = add_text(st, parts, text_start, pos)
+      #(st, r, pos + 1, list.reverse(parts))
+    }
+    <<"\\", c, r:bytes>> -> {
+      case c {
+        // \" \\ \n \r \t \f \# are all fine
+        34 | 92 | 110 | 114 | 116 | 102 | 35 ->
+          string_literal(st, r, text_start, pos + 2, parts)
+        // \u{XXXX}
+        117 -> {
+          let #(st, r, len) = unicode_escape(st, r, pos)
+          string_literal(st, r, text_start, pos + 2 + len, parts)
         }
-        False -> {
-          let assert Ok(val) = int.parse(acc)
-          list.reverse([Eof, IntLit(val), ..tokens])
+        _ -> {
+          let st =
+            err(
+              st,
+              "Unknown escape sequence",
+              pos,
+              pos + 2,
+              "this escape is not supported",
+            )
+          string_literal(st, r, text_start, pos + 2, parts)
         }
       }
+    }
+    <<"#{", r:bytes>> -> {
+      let parts = add_text(st, parts, text_start, pos)
+      let code_start = pos + 2
+      let code_len = interpolation_length(r, 0, 0)
+      let code_end = code_start + code_len
+      let inner = slice_bits(st.src, code_start, code_len)
+      let inner_st = scan(State(st.src, [], [], []), inner, code_start, False)
+      // Drop the Eof token of the inner scan.
+      let inner_tokens = case inner_st.tokens {
+        [Token(Eof, _, _), ..ts] -> list.reverse(ts)
+        ts -> list.reverse(ts)
+      }
+      let st =
+        State(
+          ..st,
+          errors: list.append(inner_st.errors, st.errors),
+          comments: list.append(inner_st.comments, st.comments),
+        )
+      let #(st, r, close) = case drop(r, code_len) {
+        <<"}", r2:bytes>> -> #(st, r2, code_end + 1)
+        r2 -> #(
+          err(
+            st,
+            "Unterminated interpolation",
+            pos,
+            code_end,
+            "expected a closing `}`",
+          ),
+          r2,
+          code_end,
+        )
+      }
+      let parts = case inner_tokens {
+        [] -> parts
+        _ -> [StrCode(inner_tokens, Span(pos, close)), ..parts]
+      }
+      string_literal(st, r, close, close, parts)
+    }
+    <<c, r:bytes>> -> {
+      let w = utf8_width(c)
+      case w {
+        1 -> string_literal(st, r, text_start, pos + 1, parts)
+        _ -> string_literal(st, drop(rest, w), text_start, pos + w, parts)
+      }
+    }
+    _ -> #(st, rest, pos, list.reverse(parts))
+  }
+}
+
+fn add_text(st: State, parts: List(StrPart), start: Int, end: Int) {
+  case end > start {
+    True -> [
+      StrText(slice(st.src, start, end - start), Span(start, end)),
+      ..parts
+    ]
+    False -> parts
+  }
+}
+
+fn unicode_escape(
+  st: State,
+  rest: BitArray,
+  pos: Int,
+) -> #(State, BitArray, Int) {
+  case rest {
+    <<"{", r:bytes>> -> {
+      let digits = count(r, is_hex, 0)
+      case drop(r, digits) {
+        <<"}", r2:bytes>> if digits >= 1 && digits <= 6 -> #(st, r2, digits + 2)
+        _ -> #(
+          err(
+            st,
+            "Invalid unicode escape",
+            pos,
+            pos + 2 + digits + 1,
+            "expected \\u{...} with 1 to 6 hex digits",
+          ),
+          drop(r, digits),
+          digits + 1,
+        )
+      }
+    }
+    _ -> #(
+      err(st, "Invalid unicode escape", pos, pos + 2, "expected `{` after \\u"),
+      rest,
+      0,
+    )
+  }
+}
+
+/// Length of the code inside `#{ ... }`, honouring nested braces and nested
+/// string literals so that `"#{ f("}") }"` works.
+fn interpolation_length(rest: BitArray, depth: Int, acc: Int) -> Int {
+  case rest {
+    <<>> -> acc
+    <<"}", _:bytes>> if depth == 0 -> acc
+    <<"}", r:bytes>> -> interpolation_length(r, depth - 1, acc + 1)
+    <<"{", r:bytes>> -> interpolation_length(r, depth + 1, acc + 1)
+    <<"\"", r:bytes>> -> {
+      let len = nested_string_length(r, 0)
+      interpolation_length(drop(r, len), depth, acc + 1 + len)
+    }
+    <<_, r:bytes>> -> interpolation_length(r, depth, acc + 1)
+    _ -> acc
+  }
+}
+
+fn nested_string_length(rest: BitArray, acc: Int) -> Int {
+  case rest {
+    <<>> -> acc
+    <<"\\", _, r:bytes>> -> nested_string_length(r, acc + 2)
+    <<"\"", _:bytes>> -> acc + 1
+    <<_, r:bytes>> -> nested_string_length(r, acc + 1)
+    _ -> acc
+  }
+}
+
+fn single_quoted_length(rest: BitArray, acc: Int) -> Int {
+  case rest {
+    <<"'", _:bytes>> | <<"\n", _:bytes>> | <<>> -> acc
+    <<_, r:bytes>> -> single_quoted_length(r, acc + 1)
+    _ -> acc
+  }
+}
+
+fn raw_string(st: State, rest: BitArray, start: Int, pos: Int, nl: Bool) {
+  case rest {
+    <<"`", r:bytes>> -> {
+      let text = slice(st.src, start + 1, pos - start - 1)
+      scan(push(st, RawStr(text), start, pos + 1, nl), r, pos + 1, False)
+    }
+    <<_, r:bytes>> -> raw_string(st, r, start, pos + 1, nl)
+    _ -> {
+      let st =
+        err(
+          st,
+          "Unterminated raw string",
+          start,
+          pos,
+          "missing closing backtick",
+        )
+      let text = slice(st.src, start + 1, pos - start - 1)
+      scan(push(st, RawStr(text), start, pos, nl), rest, pos, False)
     }
   }
 }
 
-fn is_digit(char: String) -> Bool {
-  string.contains("0123456789", char)
+// --- Helpers ---------------------------------------------------------------
+
+fn name_length(rest: BitArray, acc: Int) -> Int {
+  case rest {
+    <<c, r:bytes>> ->
+      case is_name_char(c) {
+        True -> name_length(r, acc + 1)
+        False -> acc
+      }
+    _ -> acc
+  }
 }
 
-fn consume_comment(chars: List(String), tokens: List(Token)) -> List(Token) {
-  case chars {
-    // Reached the end of the file while inside a comment
-    [] -> list.reverse([Eof, ..tokens])
+fn is_digit(c: Int) -> Bool {
+  c >= 48 && c <= 57
+}
 
-    // Found the end of the line! Go back to normal scanning
-    ["\n", ..rest] -> scan(rest, tokens)
+fn is_digit_or_underscore(c: Int) -> Bool {
+  is_digit(c) || c == 95
+}
 
-    // Anything else: throw it away and keep consuming
-    [_, ..rest] -> consume_comment(rest, tokens)
+fn is_hex(c: Int) -> Bool {
+  is_digit(c) || { c >= 97 && c <= 102 } || { c >= 65 && c <= 70 } || c == 95
+}
+
+fn is_octal(c: Int) -> Bool {
+  { c >= 48 && c <= 55 } || c == 95
+}
+
+fn is_binary(c: Int) -> Bool {
+  c == 48 || c == 49 || c == 95
+}
+
+fn is_name_start(c: Int) -> Bool {
+  { c >= 97 && c <= 122 } || { c >= 65 && c <= 90 } || c == 95
+}
+
+fn is_name_char(c: Int) -> Bool {
+  is_name_start(c) || is_digit(c)
+}
+
+fn utf8_width(c: Int) -> Int {
+  case c {
+    _ if c < 0x80 -> 1
+    _ if c >= 0xF0 -> 4
+    _ if c >= 0xE0 -> 3
+    _ if c >= 0xC0 -> 2
+    _ -> 1
   }
+}
+
+fn drop(bits: BitArray, n: Int) -> BitArray {
+  let size = bit_array.byte_size(bits)
+  case bit_array.slice(bits, n, size - n) {
+    Ok(b) -> b
+    Error(_) -> <<>>
+  }
+}
+
+fn slice_bits(bits: BitArray, start: Int, len: Int) -> BitArray {
+  case bit_array.slice(bits, start, len) {
+    Ok(b) -> b
+    Error(_) -> <<>>
+  }
+}
+
+fn slice(bits: BitArray, start: Int, len: Int) -> String {
+  case bit_array.to_string(slice_bits(bits, start, len)) {
+    Ok(s) -> s
+    Error(_) -> ""
+  }
+}
+
+/// Human readable description of a token, for error messages.
+pub fn describe(kind: Kind) -> String {
+  case kind {
+    Import -> "`import`"
+    As -> "`as`"
+    Pub -> "`pub`"
+    Def -> "`def`"
+    Fn -> "`fn`"
+    Type -> "`type`"
+    Opaque -> "`opaque`"
+    Const -> "`const`"
+    If -> "`if`"
+    Else -> "`else`"
+    Cond -> "`cond`"
+    Case -> "`case`"
+    Return -> "`return`"
+    Use -> "`use`"
+    Echo -> "`echo`"
+    Todo -> "`todo`"
+    Panic -> "`panic`"
+    Assert -> "`assert`"
+    And -> "`and`"
+    Or -> "`or`"
+    Not -> "`not`"
+    LParen -> "`(`"
+    RParen -> "`)`"
+    LBrace -> "`{`"
+    RBrace -> "`}`"
+    LBracket -> "`[`"
+    RBracket -> "`]`"
+    LtLt -> "`<<`"
+    GtGt -> "`>>`"
+    Comma -> "`,`"
+    Colon -> "`:`"
+    Dot -> "`.`"
+    DotDot -> "`..`"
+    Question -> "`?`"
+    At -> "`@`"
+    Hash -> "`#`"
+    Pipe -> "`|`"
+    PipeRight -> "`|>`"
+    Arrow -> "`->`"
+    LArrow -> "`<-`"
+    Eq -> "`=`"
+    EqEq -> "`==`"
+    NotEq -> "`!=`"
+    Less -> "`<`"
+    LessEq -> "`<=`"
+    Greater -> "`>`"
+    GreaterEq -> "`>=`"
+    LessDot -> "`<.`"
+    LessEqDot -> "`<=.`"
+    GreaterDot -> "`>.`"
+    GreaterEqDot -> "`>=.`"
+    Plus -> "`+`"
+    Minus -> "`-`"
+    Star -> "`*`"
+    Slash -> "`/`"
+    Percent -> "`%`"
+    PlusDot -> "`+.`"
+    MinusDot -> "`-.`"
+    StarDot -> "`*.`"
+    SlashDot -> "`/.`"
+    Concat -> "`<>`"
+    Bang -> "`!`"
+    AmpAmp -> "`&&`"
+    PipePipe -> "`||`"
+    Int(t) -> "the number `" <> t <> "`"
+    Float(t) -> "the number `" <> t <> "`"
+    Str(_) -> "a string"
+    RawStr(_) -> "a raw string"
+    Name(n) -> "the name `" <> n <> "`"
+    UpName(n) -> "the name `" <> n <> "`"
+    Underscore -> "`_`"
+    Eof -> "the end of the file"
+  }
+}
+
+/// Unescape Bea-only escapes so the raw text is valid inside a Gleam string.
+pub fn to_gleam_string_content(raw: String) -> String {
+  case string.contains(raw, "\\#") {
+    False -> raw
+    True -> unescape_hash(string.to_graphemes(raw), [])
+  }
+}
+
+fn unescape_hash(chars: List(String), acc: List(String)) -> String {
+  case chars {
+    [] -> string.concat(list.reverse(acc))
+    ["\\", "#", ..rest] -> unescape_hash(rest, ["#", ..acc])
+    ["\\", c, ..rest] -> unescape_hash(rest, [c, "\\", ..acc])
+    [c, ..rest] -> unescape_hash(rest, [c, ..acc])
+  }
+}
+
+/// Escape arbitrary text so it can be placed inside a Gleam string literal.
+pub fn escape_gleam_string(text: String) -> String {
+  text
+  |> string.replace("\\", "\\\\")
+  |> string.replace("\"", "\\\"")
 }

@@ -1,0 +1,43 @@
+import gleam/int
+import gleam/io
+import gleam/list
+
+pub type Usd
+
+pub type Eur
+
+pub type Jpy
+
+pub opaque type Money(currency) {
+  Money(amount: Int)
+}
+
+pub def dollar(amount: Int) -> Money(Usd) {
+  Money(amount)
+}
+
+pub def euro(amount: Int) -> Money(Eur) {
+  Money(amount)
+}
+
+pub def yen(amount: Int) -> Money(Jpy) {
+  Money(amount)
+}
+
+pub def total(prices: List(Money(currency))) -> Money(currency) {
+  prices
+  |> list.fold(0, fn(total, price) { total + price.amount })
+  |> Money
+}
+
+pub def amount(money: Money(currency)) -> Int {
+  Money(amount) = money
+  amount
+}
+
+pub def main() {
+  io.println(int.to_string(amount(total([dollar(2), dollar(3)]))))
+  io.println(int.to_string(amount(total([euro(10), euro(5)]))))
+  io.println(int.to_string(amount(total([yen(1)]))))
+  io.println(int.to_string(amount(total([]))))
+}
