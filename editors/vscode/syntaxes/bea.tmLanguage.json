@@ -2,17 +2,35 @@
   "name": "Bea",
   "scopeName": "source.bea",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#keywords" },
-    { "include": "#functions" },
-    { "include": "#types" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#operators" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    }
   ],
   "repository": {
     "comments": {
       "patterns": [
+        {
+          "name": "comment.line.documentation.bea",
+          "match": "////?.*$"
+        },
         {
           "name": "comment.line.double-slash.bea",
           "match": "//.*$"
@@ -23,11 +41,11 @@
       "patterns": [
         {
           "name": "keyword.control.bea",
-          "match": "\\b(if|else|return|case)\\b"
+          "match": "\\b(if|else|return|case|cond|use|assert)\\b"
         },
         {
           "name": "keyword.other.debug.bea",
-          "match": "\\becho\\b"
+          "match": "\\b(echo|todo|panic)\\b"
         },
         {
           "name": "keyword.operator.logical.bea",
@@ -35,11 +53,15 @@
         },
         {
           "name": "keyword.other.declaration.bea",
-          "match": "\\b(def|pub|import|type)\\b"
+          "match": "\\b(def|fn|pub|opaque|import|type|const|as)\\b"
         },
         {
           "name": "constant.language.boolean.bea",
-          "match": "\\b(True|False)\\b"
+          "match": "\\b(True|False|Nil)\\b"
+        },
+        {
+          "name": "storage.modifier.attribute.bea",
+          "match": "@[a-z_][a-zA-Z0-9_]*"
         }
       ]
     },
@@ -48,15 +70,23 @@
         {
           "match": "\\b(pub\\s+)?(def)\\s+([a-z_][a-zA-Z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.other.declaration.bea" },
-            "2": { "name": "keyword.other.declaration.bea" },
-            "3": { "name": "entity.name.function.bea" }
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "3": {
+              "name": "entity.name.function.bea"
+            }
           }
         },
         {
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
           "captures": {
-            "1": { "name": "entity.name.function.call.bea" }
+            "1": {
+              "name": "entity.name.function.call.bea"
+            }
           }
         }
       ]
@@ -64,11 +94,20 @@
     "types": {
       "patterns": [
         {
-          "match": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "match": "\\b(pub\\s+)?(opaque\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.other.declaration.bea" },
-            "2": { "name": "keyword.other.declaration.bea" },
-            "3": { "name": "entity.name.type.class.bea" }
+            "1": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "2": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "3": {
+              "name": "keyword.other.declaration.bea"
+            },
+            "4": {
+              "name": "entity.name.type.class.bea"
+            }
           }
         },
         {
@@ -97,25 +136,52 @@
               "begin": "#\\{",
               "end": "\\}",
               "beginCaptures": {
-                "0": { "name": "punctuation.section.embedded.begin.bea" }
+                "0": {
+                  "name": "punctuation.section.embedded.begin.bea"
+                }
               },
               "endCaptures": {
-                "0": { "name": "punctuation.section.embedded.end.bea" }
+                "0": {
+                  "name": "punctuation.section.embedded.end.bea"
+                }
               },
               "contentName": "source.bea",
               "patterns": [
-                { "include": "$self" }
+                {
+                  "include": "$self"
+                }
               ]
             }
           ]
+        },
+        {
+          "name": "string.quoted.other.raw.bea",
+          "begin": "`",
+          "end": "`"
         }
       ]
     },
     "numbers": {
       "patterns": [
         {
+          "name": "constant.numeric.hex.bea",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.bea",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.bea",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.bea",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]*([eE]-?[0-9_]+)?\\b"
+        },
+        {
           "name": "constant.numeric.integer.bea",
-          "match": "\\b[0-9]+\\b"
+          "match": "\\b[0-9][0-9_]*\\b"
         }
       ]
     },
@@ -123,7 +189,7 @@
       "patterns": [
         {
           "name": "keyword.operator.bea",
-          "match": "(==|!=|>|<|>=|<=|\\|>|<>|=|\\+|-|\\*|/|%|:|->)"
+          "match": "(<<|>>|==|!=|>=\\.|<=\\.|>=|<=|>\\.|<\\.|\\|>|<>|<-|->|\\+\\.|-\\.|\\*\\.|/\\.|\\?|=|>|<|\\+|-|\\*|/|%|:|\\|\\||&&|\\|)"
         }
       ]
     }

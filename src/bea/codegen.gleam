@@ -1,733 +1,1433 @@
-// src/bea/codegen.gleam
-import bea/ast
-import gleam/float
+//// Gleam code generation.
+////
+//// Takes a *lowered* module (see `bea/lower`) and prints Gleam source. Every
+//// node is wrapped in a `doc.mark` so rendering also yields a source map from
+//// generated Gleam back to the Bea source.
+////
+//// Imports are planned here: Bea auto-imports standard library modules that
+//// are referenced (`list.map`), the common unqualified names (`Some`, `None`,
+//// `Option`, `Dict`, ...), and the helper functions the lowering pass uses.
+//// All of this is scope aware: a variable called `result` never gets mistaken
+//// for the `gleam/result` module.
+
+import bea/ast.{
+  type Clause, type Expr, type Item, type Pattern, type Statement, type Type,
+}
+import bea/doc.{type Doc}
+import bea/lexer
+import bea/span.{type Span}
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 
-pub fn generate(program: ast.Program) -> String {
-  let ast.Program(statements) = program
+/// What the code generator needs to know about the rest of the project.
+pub type Context {
+  Context(
+    /// Constructors of single-variant custom types defined in other Bea
+    /// modules of the project, keyed by module path. Used to emit `let`
+    /// instead of `let assert` for patterns that can't fail.
+    single_constructors: Dict(String, Set(String)),
+  )
+}
 
-  let single_variants = collect_single_variants(statements)
+pub fn empty_context() -> Context {
+  Context(dict.new())
+}
 
-  // 1. Generate the main body code FIRST
-  let body_str =
-    statements
-    |> list.filter(fn(s) {
-      case s {
-        ast.ImportStmt(_) -> False
-        _ -> True
+pub type Output {
+  Output(code: String, mappings: List(doc.Mapping))
+}
+
+pub fn generate(module: ast.Module, ctx: Context) -> Output {
+  let plan = plan_imports(module, ctx)
+  let doc = module_doc(module, plan)
+  let #(code, mappings) = doc.render(doc, 80)
+  Output(code <> "\n", mappings)
+}
+
+// --- Import planning ----------------------------------------------------------------
+
+type Import {
+  Import(
+    module: String,
+    alias: Option(String),
+    unqualified: List(ast.Unqualified),
+    span: Span,
+    module_span: Span,
+  )
+}
+
+type Plan {
+  Plan(
+    imports: List(Import),
+    /// `$helper` placeholder -> Gleam reference
+    helpers: Dict(String, String),
+    /// Constructors (unqualified) whose type has exactly one variant.
+    single: Set(String),
+    /// Module alias -> single-variant constructors exported by it.
+    single_qualified: Dict(String, Set(String)),
+  )
+}
+
+const std_modules = [
+  #("list", "gleam/list"),
+  #("dict", "gleam/dict"),
+  #("set", "gleam/set"),
+  #("string", "gleam/string"),
+  #("int", "gleam/int"),
+  #("float", "gleam/float"),
+  #("result", "gleam/result"),
+  #("option", "gleam/option"),
+  #("io", "gleam/io"),
+  #("bool", "gleam/bool"),
+  #("order", "gleam/order"),
+  #("pair", "gleam/pair"),
+  #("function", "gleam/function"),
+  #("bit_array", "gleam/bit_array"),
+  #("bytes_tree", "gleam/bytes_tree"),
+  #("string_tree", "gleam/string_tree"),
+  #("dynamic", "gleam/dynamic"),
+  #("decode", "gleam/dynamic/decode"),
+  #("uri", "gleam/uri"),
+]
+
+/// Unqualified names Bea imports automatically: (is_type, name, module).
+const auto_unqualified = [
+  #(True, "Option", "gleam/option"),
+  #(False, "Some", "gleam/option"),
+  #(False, "None", "gleam/option"),
+  #(True, "Dict", "gleam/dict"),
+  #(True, "Set", "gleam/set"),
+  #(True, "Order", "gleam/order"),
+  #(False, "Lt", "gleam/order"),
+  #(False, "Eq", "gleam/order"),
+  #(False, "Gt", "gleam/order"),
+]
+
+/// placeholder -> (module path, default qualifier, function)
+const helper_functions = [
+  #("$result.try", #("gleam/result", "result", "try")),
+  #("$bool.guard", #("gleam/bool", "bool", "guard")),
+  #("$bool.lazy_guard", #("gleam/bool", "bool", "lazy_guard")),
+  #("$dict.from_list", #("gleam/dict", "dict", "from_list")),
+  #("$dict.insert", #("gleam/dict", "dict", "insert")),
+  #("$float.negate", #("gleam/float", "float", "negate")),
+]
+
+fn import_name(i: Import) -> String {
+  case i.alias {
+    Some(a) -> a
+    None ->
+      case string.split(i.module, "/") |> list.last {
+        Ok(n) -> n
+        Error(_) -> i.module
       }
-    })
-    |> list.map(fn(s) { generate_statement(s, single_variants) })
-    |> string.join("\n\n")
-
-  // 2. Walk the AST to collect explicit imports the user wrote
-  let base_imports = collect_imports(statements, set.new())
-
-  // 3. SMART AUTO-IMPORTS
-
-  // --- Dict ---
-  let uses_dict_mod = string.contains(body_str, "dict.")
-  let uses_dict_type = string.contains(body_str, "Dict")
-  let i1 = case uses_dict_mod, uses_dict_type {
-    False, False -> base_imports
-    True, False -> base_imports |> set.insert("gleam/dict")
-    _, True ->
-      base_imports
-      |> set.delete("gleam/dict")
-      |> set.insert("gleam/dict.{type Dict}")
-  }
-
-  // --- Result ---
-  let i2 = case string.contains(body_str, "result.") {
-    True -> set.insert(i1, "gleam/result")
-    False -> i1
-  }
-
-  // --- Option ---
-  let uses_option = string.contains(body_str, "Option")
-  let uses_some = string.contains(body_str, "Some(")
-  let uses_none = string.contains(body_str, "None")
-
-  let option_injects = []
-  let option_injects = case uses_option {
-    True -> ["type Option", ..option_injects]
-    False -> option_injects
-  }
-  let option_injects = case uses_some {
-    True -> ["Some", ..option_injects]
-    False -> option_injects
-  }
-  let option_injects = case uses_none {
-    True -> ["None", ..option_injects]
-    False -> option_injects
-  }
-
-  let i3 = case option_injects {
-    [] -> i2
-    _ -> {
-      let inj_str = "gleam/option.{" <> string.join(option_injects, ", ") <> "}"
-      i2 |> set.delete("gleam/option") |> set.insert(inj_str)
-    }
-  }
-
-  // --- Bool (for if/return guard clauses) ---
-  let final_imports = case string.contains(body_str, "bool.guard") {
-    True -> set.insert(i3, "gleam/bool")
-    False -> i3
-  }
-
-  // 4. Generate the imports string
-  let imports_str =
-    final_imports
-    |> set.to_list()
-    |> list.map(fn(mod) { "import " <> mod })
-    |> string.join("\n")
-
-  // 5. Stitch them together
-  case imports_str {
-    "" -> body_str
-    _ -> imports_str <> "\n\n" <> body_str
   }
 }
 
-// Scans statements for custom types that have exactly one variant constructor
-fn collect_single_variants(statements: List(ast.Statement)) -> Set(String) {
-  list.fold(statements, set.new(), fn(acc, stmt) {
-    case stmt {
-      ast.CustomTypeStmt(_is_pub, _name, [ast.TypeVariant(variant_name, _)]) ->
-        set.insert(acc, variant_name)
+fn plan_imports(module: ast.Module, ctx: Context) -> Plan {
+  let usage = collect(module)
+  let user_imports =
+    list.filter_map(module.items, fn(it) {
+      case it {
+        ast.Import(span, m, ms, alias, uq) ->
+          Ok(Import(m, option.map(alias, fn(a) { a.0 }), uq, span, ms))
+        _ -> Error(Nil)
+      }
+    })
+  let imported_names = list.map(user_imports, import_name) |> set.from_list
+  let imported_modules =
+    list.map(user_imports, fn(i) { i.module }) |> set.from_list
+
+  // 1. Standard library modules used by qualifier but not imported.
+  let auto_modules =
+    usage.modules
+    |> set.to_list
+    |> list.filter(fn(q) { !set.contains(imported_names, q) })
+    |> list.filter_map(fn(q) { list.key_find(std_modules, q) })
+    |> list.filter(fn(m) { !set.contains(imported_modules, m) })
+    |> list.unique
+    |> list.sort(string.compare)
+    |> list.map(fn(m) { Import(m, None, [], span.empty, span.empty) })
+  let imports = list.append(user_imports, auto_modules)
+
+  // 2. Unqualified names like `Some` or `Dict`.
+  let locally_defined = local_type_names(module)
+  let unqualified_imported =
+    list.flat_map(user_imports, fn(i) {
+      list.map(i.unqualified, fn(u) {
+        #(u.is_type, option.unwrap(u.alias, u.name))
+      })
+    })
+    |> set.from_list
+  let imports =
+    list.fold(auto_unqualified, imports, fn(imports, entry) {
+      let #(is_type, name, m) = entry
+      let used = set.contains(usage.unqualified, #(is_type, name))
+      let available =
+        set.contains(locally_defined, name)
+        || set.contains(unqualified_imported, #(is_type, name))
+      case used && !available {
+        True ->
+          add_unqualified(
+            imports,
+            m,
+            ast.Unqualified(span.empty, is_type, name, None),
+          )
+        False -> imports
+      }
+    })
+
+  // 3. Helpers used by lowered code.
+  let taken = set.union(usage.locals, module_values(module))
+  let #(imports, helpers) =
+    list.fold(helper_functions, #(imports, dict.new()), fn(acc, entry) {
+      let #(imports, helpers) = acc
+      let #(placeholder, #(m, qualifier, f)) = entry
+      case set.contains(usage.helpers, placeholder) {
+        False -> acc
+        True -> {
+          let existing = list.find(imports, fn(i) { i.module == m })
+          let names = list.map(imports, import_name) |> set.from_list
+          case existing {
+            Ok(i) ->
+              case set.contains(taken, import_name(i)) {
+                False -> #(
+                  imports,
+                  dict.insert(helpers, placeholder, import_name(i) <> "." <> f),
+                )
+                True -> {
+                  let alias = "bea_" <> qualifier <> "_" <> f
+                  #(
+                    add_unqualified(
+                      imports,
+                      m,
+                      ast.Unqualified(span.empty, False, f, Some(alias)),
+                    ),
+                    dict.insert(helpers, placeholder, alias),
+                  )
+                }
+              }
+            Error(_) ->
+              case
+                set.contains(taken, qualifier) || set.contains(names, qualifier)
+              {
+                False -> #(
+                  list.append(imports, [
+                    Import(m, None, [], span.empty, span.empty),
+                  ]),
+                  dict.insert(helpers, placeholder, qualifier <> "." <> f),
+                )
+                True -> {
+                  let alias = "bea_" <> qualifier <> "_" <> f
+                  #(
+                    list.append(imports, [
+                      Import(
+                        m,
+                        // Only alias the module if its name is already
+                        // used by another import (an unused alias warns).
+                        case set.contains(names, qualifier) {
+                          True -> Some("bea_" <> qualifier)
+                          False -> None
+                        },
+                        [ast.Unqualified(span.empty, False, f, Some(alias))],
+                        span.empty,
+                        span.empty,
+                      ),
+                    ]),
+                    dict.insert(helpers, placeholder, alias),
+                  )
+                }
+              }
+          }
+        }
+      }
+    })
+
+  // 4. Which constructors can't fail to match.
+  let single = single_constructors(module)
+  let single =
+    list.fold(user_imports, single, fn(single, i) {
+      case dict.get(ctx.single_constructors, i.module) {
+        Ok(ctors) ->
+          list.fold(i.unqualified, single, fn(single, u) {
+            case !u.is_type && set.contains(ctors, u.name) {
+              True -> set.insert(single, option.unwrap(u.alias, u.name))
+              False -> single
+            }
+          })
+        Error(_) -> single
+      }
+    })
+    |> set.insert("Nil")
+  let single_qualified =
+    list.fold(user_imports, dict.new(), fn(acc, i) {
+      case dict.get(ctx.single_constructors, i.module) {
+        Ok(ctors) -> dict.insert(acc, import_name(i), ctors)
+        Error(_) -> acc
+      }
+    })
+
+  let imports =
+    imports
+    |> list.map(fn(i) {
+      Import(
+        ..i,
+        unqualified: list.sort(i.unqualified, fn(a, b) {
+          case a.is_type, b.is_type {
+            True, False -> order.Lt
+            False, True -> order.Gt
+            _, _ -> string.compare(a.name, b.name)
+          }
+        }),
+      )
+    })
+    |> list.sort(fn(a, b) { string.compare(a.module, b.module) })
+  Plan(imports, helpers, single, single_qualified)
+}
+
+fn add_unqualified(
+  imports: List(Import),
+  m: String,
+  u: ast.Unqualified,
+) -> List(Import) {
+  case list.any(imports, fn(i) { i.module == m }) {
+    True ->
+      list.map(imports, fn(i) {
+        case i.module == m {
+          True -> Import(..i, unqualified: list.append(i.unqualified, [u]))
+          False -> i
+        }
+      })
+    False ->
+      list.append(imports, [Import(m, None, [u], span.empty, span.empty)])
+  }
+}
+
+fn local_type_names(module: ast.Module) -> Set(String) {
+  list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.CustomType(name:, variants:, ..) ->
+        list.fold(variants, set.insert(acc, name), fn(acc, v) {
+          set.insert(acc, v.name)
+        })
+      ast.TypeAlias(name:, ..) | ast.ExternalType(name:, ..) ->
+        set.insert(acc, name)
       _ -> acc
     }
   })
 }
 
-// Determines if a pattern is guaranteed to match without runtime assertions
-fn is_irrefutable_pattern(
-  expr: ast.Expr,
-  single_variants: Set(String),
-) -> Bool {
-  case expr {
-    // Variable binding or discard (e.g. `x`, `_`, `user_id`)
-    ast.IdentExpr(name) -> {
-      let first = string.slice(name, 0, 1)
-      case first == string.lowercase(first) {
-        True -> True
-        False -> set.contains(single_variants, name)
-      }
-    }
-
-    // Typed pattern (e.g. `x: Int`)
-    ast.TypedExpr(inner, _) -> is_irrefutable_pattern(inner, single_variants)
-
-    // Alias pattern (e.g. `pattern as name`)
-    ast.AliasExpr(pattern, _) ->
-      is_irrefutable_pattern(pattern, single_variants)
-
-    // Tuple pattern: irrefutable if every sub-element is irrefutable
-    ast.TupleExpr(elements) ->
-      list.all(elements, fn(el) { is_irrefutable_pattern(el, single_variants) })
-
-    // Constructor pattern: irrefutable if it has only one variant and all args are irrefutable
-    ast.CallExpr(name, args) -> {
-      case set.contains(single_variants, name) {
-        True ->
-          list.all(args, fn(arg) {
-            let #(_label, val) = arg
-            is_irrefutable_pattern(val, single_variants)
-          })
-        False -> False
-      }
-    }
-
-    // Literals, lists, and multi-variant constructors are refutable
-    _ -> False
-  }
-}
-
-// Recursively walks a list of statements to collect required imports
-fn collect_imports(
-  statements: List(ast.Statement),
-  imports: Set(String),
-) -> Set(String) {
-  case statements {
-    [] -> imports
-    [stmt, ..rest] -> {
-      let new_imports = analyze_statement(stmt, imports)
-      collect_imports(rest, new_imports)
-    }
-  }
-}
-
-fn analyze_statement(stmt: ast.Statement, imports: Set(String)) -> Set(String) {
-  case stmt {
-    ast.DefStmt(_, _, _, clauses) ->
-      list.fold(clauses, imports, fn(acc, clause) {
-        collect_imports(clause.body, acc)
-      })
-
-    ast.ImportStmt(path) -> set.insert(imports, path)
-
-    _ -> imports
-  }
-}
-
-fn generate_statement(
-  stmt: ast.Statement,
-  single_variants: Set(String),
-) -> String {
-  case stmt {
-    // Module-level Constants
-    ast.ConstStmt(is_pub, name, value) -> {
-      let pub_prefix = case is_pub {
-        True -> "pub "
-        False -> ""
-      }
-      pub_prefix
-      <> "const "
-      <> name
-      <> " = "
-      <> generate_expression(value, single_variants)
-    }
-
-    // Custom Types (Structs and Enums)
-    ast.CustomTypeStmt(is_pub, name, variants) -> {
-      let pub_prefix = case is_pub {
-        True -> "pub "
-        False -> ""
-      }
-
-      let variants_str =
-        variants
-        |> list.map(fn(v) {
-          let ast.TypeVariant(v_name, fields) = v
-          case fields {
-            [] -> v_name
-            _ -> {
-              let fields_str =
-                fields
-                |> list.map(fn(f) {
-                  let #(f_name, f_type) = f
-                  case f_name {
-                    "" -> f_type
-                    _ -> f_name <> ": " <> f_type
-                  }
-                })
-                |> string.join(", ")
-              v_name <> "(" <> fields_str <> ")"
-            }
+fn module_values(module: ast.Module) -> Set(String) {
+  list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.Function(name:, ..) | ast.Const(name:, ..) -> set.insert(acc, name)
+      ast.Import(unqualified:, ..) ->
+        list.fold(unqualified, acc, fn(acc, u) {
+          case u.is_type {
+            True -> acc
+            False -> set.insert(acc, option.unwrap(u.alias, u.name))
           }
         })
-        |> string.join("\n  ")
-
-      pub_prefix <> "type " <> name <> " {\n  " <> variants_str <> "\n}"
-    }
-
-    // Function Definitions
-    ast.DefStmt(is_pub, name, return_type, clauses) -> {
-      let pub_prefix = case is_pub {
-        True -> "pub "
-        False -> ""
-      }
-
-      let ret_str = case return_type {
-        "" -> ""
-        t -> " -> " <> t
-      }
-
-      case clauses {
-        [ast.Clause(params, [], body)] -> {
-          case is_simple_params(params) {
-            True -> {
-              let params_str =
-                params |> list.map(generate_pattern) |> string.join(", ")
-              let body_str =
-                body
-                |> list.map(fn(s) { generate_statement(s, single_variants) })
-                |> string.join("\n  ")
-              pub_prefix
-              <> "fn "
-              <> name
-              <> "("
-              <> params_str
-              <> ")"
-              <> ret_str
-              <> " {\n  "
-              <> body_str
-              <> "\n}"
-            }
-            False ->
-              generate_multi_clause(
-                is_pub,
-                name,
-                return_type,
-                clauses,
-                single_variants,
-              )
-          }
-        }
-        _ ->
-          generate_multi_clause(
-            is_pub,
-            name,
-            return_type,
-            clauses,
-            single_variants,
-          )
-      }
-    }
-
-    // Return statement
-    ast.ReturnStmt(expr) -> generate_expression(expr, single_variants)
-
-    // Error Propagation Assignment (The ? Operator)
-    ast.AssignStmt(pattern_expr, ast.TryExpr(value_expr)) -> {
-      let pat_str = generate_pattern(pattern_expr)
-      let val_str = generate_expression(value_expr, single_variants)
-      "use " <> pat_str <> " <- result.try(" <> val_str <> ")"
-    }
-
-    // Optimized Assignment: Emits `let` if irrefutable, otherwise `let assert`
-    ast.AssignStmt(pattern_expr, value_expr) -> {
-      let pat_str = generate_pattern(pattern_expr)
-      let val_str = generate_expression(value_expr, single_variants)
-      case is_irrefutable_pattern(pattern_expr, single_variants) {
-        True -> "let " <> pat_str <> " = " <> val_str
-        False -> "let assert " <> pat_str <> " = " <> val_str
-      }
-    }
-
-    // Optimized early return: Standalone if that just returns
-    ast.ExprStmt(ast.IfExpr(condition, [ast.ReturnStmt(ret_expr)], [])) -> {
-      let cond_str = generate_expression(condition, single_variants)
-      let ret_str = generate_expression(ret_expr, single_variants)
-      "use <- bool.guard(when: " <> cond_str <> ", return: " <> ret_str <> ")"
-    }
-
-    // Error Propagation Standalone Expression
-    ast.ExprStmt(ast.TryExpr(value_expr)) -> {
-      "use _ <- result.try("
-      <> generate_expression(value_expr, single_variants)
-      <> ")"
-    }
-
-    // Standard Standalone Expression
-    ast.ExprStmt(expr) -> generate_expression(expr, single_variants)
-
-    // Type Aliases
-    ast.TypeAliasStmt(is_pub, name, aliased_type) -> {
-      let pub_prefix = case is_pub {
-        True -> "pub "
-        False -> ""
-      }
-      pub_prefix <> "type " <> name <> " = " <> aliased_type
-    }
-
-    ast.ImportStmt(_) -> ""
-  }
-}
-
-fn generate_multi_clause(
-  is_pub: Bool,
-  name: String,
-  return_type: String,
-  clauses: List(ast.Clause),
-  single_variants: Set(String),
-) -> String {
-  let pub_prefix = case is_pub {
-    True -> "pub "
-    False -> ""
-  }
-  let ret_str = case return_type {
-    "" -> ""
-    t -> " -> " <> t
-  }
-
-  let first_clause =
-    list.first(clauses) |> result.unwrap(ast.Clause([], [], []))
-  let arity = list.length(first_clause.params)
-  let args = make_synthetic_params(0, arity, [])
-
-  let typed_args =
-    list.zip(args, first_clause.params)
-    |> list.map(fn(pair) {
-      let #(arg, p) = pair
-      case p {
-        ast.TypedExpr(_, type_name) -> arg <> ": " <> type_name
-        _ -> arg
-      }
-    })
-
-  let params_def = string.join(typed_args, ", ")
-  let match_target = string.join(args, ", ")
-  let valid_clauses = list.filter(clauses, fn(c) { c.body != [] })
-
-  let cases_str =
-    valid_clauses
-    |> list.map(fn(c) { generate_clause_arm(c, single_variants) })
-    |> string.join("\n    ")
-
-  pub_prefix
-  <> "fn "
-  <> name
-  <> "("
-  <> params_def
-  <> ")"
-  <> ret_str
-  <> " {\n  case "
-  <> match_target
-  <> " {\n    "
-  <> cases_str
-  <> "\n  }\n}"
-}
-
-fn is_simple_params(params: List(ast.Expr)) -> Bool {
-  list.all(params, fn(p) {
-    case p {
-      ast.IdentExpr(_) -> True
-      ast.TypedExpr(ast.IdentExpr(_), _) -> True
-      ast.LabelExpr(_, ast.IdentExpr(_)) -> True
-      ast.TypedExpr(ast.LabelExpr(_, ast.IdentExpr(_)), _) -> True
-      _ -> False
+      _ -> acc
     }
   })
 }
 
-fn strip_param_metadata(expr: ast.Expr) -> ast.Expr {
-  case expr {
-    ast.TypedExpr(inner, _) -> strip_param_metadata(inner)
-    ast.LabelExpr(_, inner) -> strip_param_metadata(inner)
-    _ -> expr
-  }
+fn single_constructors(module: ast.Module) -> Set(String) {
+  list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.CustomType(variants: [v], ..) -> set.insert(acc, v.name)
+      _ -> acc
+    }
+  })
 }
 
-fn generate_clause_arm(
-  clause: ast.Clause,
-  single_variants: Set(String),
-) -> String {
-  let ast.Clause(params, guard, body) = clause
-  let pattern_str =
-    params
-    |> list.map(strip_param_metadata)
-    |> list.map(generate_pattern)
-    |> string.join(", ")
-
-  let guard_str = case guard {
-    [] -> ""
-    [g] -> " if " <> generate_expression(g, single_variants)
-    _ -> ""
-  }
-
-  let body_str =
-    body
-    |> list.map(fn(s) { generate_statement(s, single_variants) })
-    |> string.join("\n      ")
-
-  pattern_str <> guard_str <> " -> {\n      " <> body_str <> "\n    }"
+/// Public so the project compiler can build a `Context`.
+pub fn exported_single_constructors(module: ast.Module) -> Set(String) {
+  list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.CustomType(variants: [v], publicity: ast.Public, opaque_: False, ..) ->
+        set.insert(acc, v.name)
+      _ -> acc
+    }
+  })
 }
 
-fn generate_pattern(expr: ast.Expr) -> String {
-  case expr {
-    ast.IntExpr(val) -> int.to_string(val)
-    ast.StringExpr(val) -> "\"" <> val <> "\""
-    ast.IdentExpr(name) -> name
-    ast.TypedExpr(inner, type_name) ->
-      generate_pattern(inner) <> ": " <> type_name
+// --- Usage collection (scope aware) ---------------------------------------------------
 
-    ast.AliasExpr(pattern, name) -> {
-      generate_pattern(pattern) <> " as " <> name
-    }
-
-    ast.ListExpr(elements) -> {
-      let elements_str =
-        elements |> list.map(generate_pattern) |> string.join(", ")
-      "[" <> elements_str <> "]"
-    }
-
-    ast.ListConsExpr(head, tail) -> {
-      "[" <> generate_pattern(head) <> ", .." <> generate_pattern(tail) <> "]"
-    }
-
-    ast.TupleExpr(elements) -> {
-      let elements_str =
-        elements |> list.map(generate_pattern) |> string.join(", ")
-      "#(" <> elements_str <> ")"
-    }
-
-    ast.CallExpr(name, args) -> {
-      let args_str =
-        args
-        |> list.map(fn(arg) {
-          let #(label, expr) = arg
-          case label {
-            "" -> generate_pattern(expr)
-            lbl -> lbl <> ": " <> generate_pattern(expr)
-          }
-        })
-        |> string.join(", ")
-      name <> "(" <> args_str <> ")"
-    }
-
-    ast.LabelExpr(label, inner_expr) -> {
-      label <> " " <> generate_pattern(inner_expr)
-    }
-
-    _ -> panic as "Unsupported pattern expression"
-  }
+type Usage {
+  Usage(
+    modules: Set(String),
+    unqualified: Set(#(Bool, String)),
+    helpers: Set(String),
+    locals: Set(String),
+  )
 }
 
-fn generate_expression(expr: ast.Expr, single_variants: Set(String)) -> String {
-  case expr {
-    ast.IntExpr(val) -> int.to_string(val)
-    ast.FloatExpr(val) -> float.to_string(val)
-    ast.StringExpr(val) -> "\"" <> val <> "\""
-    ast.IdentExpr(name) -> name
-
-    ast.AliasExpr(pattern, name) -> {
-      generate_expression(pattern, single_variants) <> " as " <> name
-    }
-
-    ast.UnaryExpr("!", inner) ->
-      "!" <> generate_expression(inner, single_variants)
-    ast.UnaryExpr(op, _) -> panic as { "Unsupported unary operator: " <> op }
-
-    ast.TypedExpr(inner, type_name) ->
-      generate_expression(inner, single_variants) <> ": " <> type_name
-
-    ast.BinaryExpr(left, op, right) -> {
-      let gleam_op = case op {
-        "and" -> "&&"
-        "or" -> "||"
-        other -> other
-      }
-
-      "{"
-      <> generate_expression(left, single_variants)
-      <> " "
-      <> gleam_op
-      <> " "
-      <> generate_expression(right, single_variants)
-      <> "}"
-    }
-
-    ast.CallExpr(name, args) -> {
-      let args_str =
-        args
-        |> list.map(fn(arg) {
-          let #(label, e) = arg
-          case label {
-            "" -> generate_expression(e, single_variants)
-            lbl -> lbl <> ": " <> generate_expression(e, single_variants)
-          }
-        })
-        |> string.join(", ")
-      name <> "(" <> args_str <> ")"
-    }
-
-    ast.EchoExpr(inner) ->
-      "{ echo " <> generate_expression(inner, single_variants) <> " }"
-
-    ast.ListExpr(elements) -> {
-      let elements_str =
-        elements
-        |> list.map(fn(e) { generate_expression(e, single_variants) })
-        |> string.join(", ")
-      "[" <> elements_str <> "]"
-    }
-
-    ast.ListConsExpr(head, tail) -> {
-      "["
-      <> generate_expression(head, single_variants)
-      <> ", .."
-      <> generate_expression(tail, single_variants)
-      <> "]"
-    }
-
-    ast.IfExpr(condition, body, else_body) -> {
-      let cond_str = generate_expression(condition, single_variants)
-      let body_str =
-        body
-        |> list.map(fn(s) { generate_statement(s, single_variants) })
-        |> string.join("\n      ")
-
-      case else_body {
-        [] ->
-          "case "
-          <> cond_str
-          <> " {\n    True -> {\n      "
-          <> body_str
-          <> "\n    }\n    False -> Nil\n  }"
-        _ -> {
-          let else_str =
-            else_body
-            |> list.map(fn(s) { generate_statement(s, single_variants) })
-            |> string.join("\n      ")
-          "case "
-          <> cond_str
-          <> " {\n    True -> {\n      "
-          <> body_str
-          <> "\n    }\n    False -> {\n      "
-          <> else_str
-          <> "\n    }\n  }"
-        }
-      }
-    }
-
-    ast.CondExpr(clauses) -> generate_cond(clauses, single_variants)
-
-    ast.CaseExpr(subject, clauses) -> {
-      let sub_str = generate_expression(subject, single_variants)
-      let clauses_str =
-        clauses
-        |> list.map(fn(c) { generate_case_clause(c, single_variants) })
-        |> string.join("\n    ")
-      "case " <> sub_str <> " {\n    " <> clauses_str <> "\n  }"
-    }
-
-    ast.TupleExpr(elements) -> {
-      let elements_str =
-        elements
-        |> list.map(fn(e) { generate_expression(e, single_variants) })
-        |> string.join(", ")
-      "#(" <> elements_str <> ")"
-    }
-
-    ast.TupleIndexExpr(tuple, idx) -> {
-      generate_expression(tuple, single_variants) <> "." <> int.to_string(idx)
-    }
-
-    ast.MapExpr(pairs) -> {
-      let pairs_str =
-        pairs
-        |> list.map(fn(p) {
-          let #(k, v) = p
-          "#("
-          <> generate_expression(k, single_variants)
-          <> ", "
-          <> generate_expression(v, single_variants)
-          <> ")"
-        })
-        |> string.join(", ")
-      "dict.from_list([" <> pairs_str <> "])"
-    }
-
-    ast.AnonFnExpr(params, body) -> {
-      let params_str = params |> list.map(generate_pattern) |> string.join(", ")
-      let body_str =
-        body
-        |> list.map(fn(s) { generate_statement(s, single_variants) })
-        |> string.join("\n      ")
-      "fn(" <> params_str <> ") {\n      " <> body_str <> "\n    }"
-    }
-
-    ast.RecordAccessExpr(base, field) -> {
-      generate_expression(base, single_variants) <> "." <> field
-    }
-
-    ast.RecordUpdateExpr(name, base, updates) -> {
-      let base_str = generate_expression(base, single_variants)
-
-      case updates {
-        [] -> name <> "(.." <> base_str <> ")"
-        _ -> {
-          let updates_str =
-            updates
-            |> list.map(fn(arg) {
-              let #(label, e) = arg
-              case label {
-                "" -> generate_expression(e, single_variants)
-                lbl -> lbl <> ": " <> generate_expression(e, single_variants)
-              }
+fn collect(module: ast.Module) -> Usage {
+  let u = Usage(set.new(), set.new(), set.new(), set.new())
+  list.fold(module.items, u, fn(u, it) {
+    case it {
+      ast.Function(clauses:, ..) ->
+        list.fold(clauses, u, fn(u, c) {
+          let u =
+            list.fold(c.params, u, fn(u, p) {
+              u_type_opt(u, p.annotation) |> u_pattern(p.pattern)
             })
-            |> string.join(", ")
-          name <> "(.." <> base_str <> ", " <> updates_str <> ")"
+          let u = u_type_opt(u, c.return_type)
+          let scope =
+            list.fold(c.params, set.new(), fn(s, p) { bind(s, p.pattern) })
+          let u = case c.guard {
+            Some(g) -> u_expr(u, scope, g)
+            None -> u
+          }
+          u_stmts(u, scope, option.unwrap(c.body, []))
+        })
+      ast.Const(annotation:, value:, ..) ->
+        u_type_opt(u, annotation) |> u_expr(set.new(), value)
+      ast.CustomType(variants:, ..) ->
+        list.fold(variants, u, fn(u, v) {
+          list.fold(v.fields, u, fn(u, f) { u_type(u, f.type_) })
+        })
+      ast.TypeAlias(aliased:, ..) -> u_type(u, aliased)
+      _ -> u
+    }
+  })
+}
+
+fn bind(scope: Set(String), p: Pattern) -> Set(String) {
+  case p {
+    ast.PVar(_, n) -> set.insert(scope, n)
+    ast.PAssign(_, inner, n) -> bind(set.insert(scope, n), inner)
+    ast.PTuple(_, ps) -> list.fold(ps, scope, bind)
+    ast.PList(_, ps, t) ->
+      list.fold(list.append(ps, option.values([t])), scope, bind)
+    ast.PConstructor(args:, ..) ->
+      list.fold(args, scope, fn(s, a) {
+        case a.value, a.label {
+          Some(v), _ -> bind(s, v)
+          None, Some(l) -> set.insert(s, l)
+          None, None -> s
         }
+      })
+    ast.PConcat(_, _, name, rest) -> {
+      let s = case name {
+        Some(n) -> set.insert(scope, n)
+        None -> scope
       }
+      bind(s, rest)
     }
-
-    ast.BlockExpr(stmts) -> {
-      let stmts_str =
-        stmts
-        |> list.map(fn(s) { generate_statement(s, single_variants) })
-        |> string.join("\n      ")
-      "{\n      " <> stmts_str <> "\n    }"
-    }
-
-    ast.TryExpr(_) ->
-      panic as "The ? operator can only be used directly on assignments or standalone statements in Bea"
-
-    ast.PanicExpr -> "panic"
-
-    ast.PanicAsExpr(msg) ->
-      "panic as " <> generate_expression(msg, single_variants)
-
-    // Handle labels in standard expressions
-    ast.LabelExpr(label, inner_expr) -> {
-      label <> " " <> generate_expression(inner_expr, single_variants)
-    }
+    ast.PBitArray(_, segs) ->
+      list.fold(segs, scope, fn(s, seg) { bind(s, seg.value) })
+    _ -> scope
   }
 }
 
-fn make_synthetic_params(
-  current: Int,
-  arity: Int,
-  acc: List(String),
-) -> List(String) {
-  case current >= arity {
-    True -> list.reverse(acc)
-    False ->
-      make_synthetic_params(current + 1, arity, [
-        "arg_" <> int.to_string(current),
-        ..acc
+fn u_pattern(u: Usage, p: Pattern) -> Usage {
+  let u = Usage(..u, locals: bind(u.locals, p))
+  case p {
+    ast.PConstructor(module: None, name:, args:, ..) ->
+      list.fold(args, add_unq(u, False, name), fn(u, a) {
+        case a.value {
+          Some(v) -> u_pattern(u, v)
+          None -> u
+        }
+      })
+    ast.PConstructor(module: Some(m), args:, ..) ->
+      list.fold(args, Usage(..u, modules: set.insert(u.modules, m)), fn(u, a) {
+        case a.value {
+          Some(v) -> u_pattern(u, v)
+          None -> u
+        }
+      })
+    ast.PAssign(_, inner, _) -> u_pattern(u, inner)
+    ast.PTuple(_, ps) -> list.fold(ps, u, u_pattern)
+    ast.PList(_, ps, t) ->
+      list.fold(list.append(ps, option.values([t])), u, u_pattern)
+    ast.PConcat(_, _, _, rest) -> u_pattern(u, rest)
+    ast.PBitArray(_, segs) ->
+      list.fold(segs, u, fn(u, s) {
+        list.fold(s.options, u_pattern(u, s.value), fn(u, o) {
+          case o.arg {
+            Some(a) -> u_pattern(u, a)
+            None -> u
+          }
+        })
+      })
+    _ -> u
+  }
+}
+
+fn add_unq(u: Usage, is_type: Bool, name: String) -> Usage {
+  Usage(..u, unqualified: set.insert(u.unqualified, #(is_type, name)))
+}
+
+fn u_type_opt(u: Usage, t: Option(Type)) -> Usage {
+  case t {
+    Some(t) -> u_type(u, t)
+    None -> u
+  }
+}
+
+fn u_type(u: Usage, t: Type) -> Usage {
+  case t {
+    ast.NamedType(_, None, name, args) ->
+      list.fold(args, add_unq(u, True, name), u_type)
+    ast.NamedType(_, Some(m), _, args) ->
+      list.fold(args, Usage(..u, modules: set.insert(u.modules, m)), u_type)
+    ast.TupleType(_, ts) -> list.fold(ts, u, u_type)
+    ast.FnType(_, ps, r) -> u_type(list.fold(ps, u, u_type), r)
+    _ -> u
+  }
+}
+
+fn u_stmts(u: Usage, scope: Set(String), stmts: List(Statement)) -> Usage {
+  case stmts {
+    [] -> u
+    [stmt, ..rest] ->
+      case stmt {
+        ast.Assign(_, p, t, v) -> {
+          let u = u_expr(u, scope, v) |> u_type_opt(t) |> u_pattern(p)
+          u_stmts(u, bind(scope, p), rest)
+        }
+        ast.Use(_, ps, call) -> {
+          let u = u_expr(u, scope, call)
+          let u =
+            list.fold(ps, u, fn(u, p) {
+              u_pattern(u, p.pattern) |> u_type_opt(p.annotation)
+            })
+          let scope = list.fold(ps, scope, fn(s, p) { bind(s, p.pattern) })
+          u_stmts(u, scope, rest)
+        }
+        ast.Expression(e) | ast.Return(_, e) ->
+          u_stmts(u_expr(u, scope, e), scope, rest)
+        ast.Assert(_, e, m) -> {
+          let u = u_expr(u, scope, e)
+          let u = case m {
+            Some(m) -> u_expr(u, scope, m)
+            None -> u
+          }
+          u_stmts(u, scope, rest)
+        }
+      }
+  }
+}
+
+fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
+  let go = fn(u, x) { u_expr(u, scope, x) }
+  case e {
+    ast.Var(_, n) ->
+      case string.starts_with(n, "$") {
+        True -> Usage(..u, helpers: set.insert(u.helpers, n))
+        False -> u
+      }
+    ast.Constructor(_, None, n) -> add_unq(u, False, n)
+    ast.Constructor(_, Some(m), _) ->
+      Usage(..u, modules: set.insert(u.modules, m))
+    ast.FieldAccess(_, ast.Var(_, m), _, _) ->
+      case set.contains(scope, m) {
+        True -> u
+        False -> Usage(..u, modules: set.insert(u.modules, m))
+      }
+    ast.Int(..) | ast.Float(..) | ast.RawString(..) | ast.Hole(..) -> u
+    ast.String(_, parts) ->
+      list.fold(parts, u, fn(u, p) {
+        case p {
+          ast.Interpolation(x, _) -> go(u, x)
+          _ -> u
+        }
+      })
+    ast.FieldAccess(_, b, _, _) | ast.TupleIndex(_, b, _) -> go(u, b)
+    ast.Call(_, f, args) -> list.fold(arg_values(args), go(u, f), go)
+    ast.RecordUpdate(_, c, b, args) ->
+      list.fold(arg_values(args), go(go(u, c), b), go)
+    ast.Tuple(_, es) -> list.fold(es, u, go)
+    ast.List(_, es, t) -> list.fold(list.append(es, option.values([t])), u, go)
+    ast.Map(_, b, pairs) -> {
+      let u =
+        Usage(..u, helpers: case b {
+          Some(_) -> set.insert(u.helpers, "$dict.insert")
+          None -> set.insert(u.helpers, "$dict.from_list")
+        })
+      let u = list.fold(option.values([b]), u, go)
+      list.fold(pairs, u, fn(u, kv) { go(go(u, kv.0), kv.1) })
+    }
+    ast.Fn(_, params, ret, body) -> {
+      let u =
+        list.fold(params, u, fn(u, p) {
+          u_pattern(u, p.pattern) |> u_type_opt(p.annotation)
+        })
+      let u = u_type_opt(u, ret)
+      let inner = list.fold(params, scope, fn(s, p) { bind(s, p.pattern) })
+      u_stmts(u, inner, body)
+    }
+    ast.Block(_, stmts) -> u_stmts(u, scope, stmts)
+    ast.If(_, c, t, el) -> {
+      let u = u_stmts(go(u, c), scope, t)
+      case el {
+        Some(el) -> u_stmts(u, scope, el)
+        None -> u
+      }
+    }
+    ast.Cond(_, clauses) ->
+      list.fold(clauses, u, fn(u, c) { go(go(u, c.condition), c.body) })
+    ast.Case(_, subjects, clauses) -> {
+      let u = list.fold(subjects, u, go)
+      list.fold(clauses, u, fn(u, c) {
+        let inner =
+          list.fold(c.alternatives, scope, fn(s, alt) {
+            list.fold(alt, s, bind)
+          })
+        let u =
+          list.fold(c.alternatives, u, fn(u, alt) {
+            list.fold(alt, u, u_pattern)
+          })
+        let u = case c.guard {
+          Some(g) -> u_expr(u, inner, g)
+          None -> u
+        }
+        u_expr(u, inner, c.body)
+      })
+    }
+    ast.BinaryOp(_, _, l, r) -> go(go(u, l), r)
+    ast.Negate(_, x) | ast.Not(_, x) | ast.Try(_, x) -> go(u, x)
+    ast.NegateFloat(_, x) ->
+      go(Usage(..u, helpers: set.insert(u.helpers, "$float.negate")), x)
+    ast.Echo(_, x, m) -> list.fold(option.values([x, m]), u, go)
+    ast.Panic(_, m) | ast.Todo(_, m) -> list.fold(option.values([m]), u, go)
+    ast.BitArray(_, segs) ->
+      list.fold(segs, u, fn(u, s) {
+        list.fold(
+          option.values(list.map(s.options, fn(o) { o.arg })),
+          go(u, s.value),
+          go,
+        )
+      })
+  }
+}
+
+fn arg_values(args: List(ast.Arg)) -> List(Expr) {
+  option.values(list.map(args, fn(a) { a.value }))
+}
+
+// --- Printing -----------------------------------------------------------------------
+
+fn t(s: String) -> Doc {
+  doc.text(s)
+}
+
+fn mk(d: Doc, s: Span) -> Doc {
+  case s == span.empty {
+    True -> d
+    False -> doc.mark(d, s)
+  }
+}
+
+fn module_doc(module: ast.Module, plan: Plan) -> Doc {
+  let header = list.map(module.module_doc, fn(line) { t("////" <> line) })
+  let imports = list.map(plan.imports, import_doc)
+  let items =
+    module.items
+    |> list.filter(fn(it) {
+      case it {
+        ast.Import(..) -> False
+        _ -> True
+      }
+    })
+    |> list.map(item_doc(_, plan))
+  let sections =
+    [header, imports, items]
+    |> list.filter(fn(s) { s != [] })
+    |> list.map(fn(section) {
+      case section == items {
+        True -> doc.join(section, doc.concat([doc.hard_line, doc.hard_line]))
+        False -> doc.join(section, doc.hard_line)
+      }
+    })
+  doc.join(sections, doc.concat([doc.hard_line, doc.hard_line]))
+}
+
+fn import_doc(i: Import) -> Doc {
+  let uq = case i.unqualified {
+    [] -> doc.empty
+    uqs ->
+      doc.concat([
+        t("."),
+        doc.comma_list(
+          "{",
+          list.map(uqs, fn(u) {
+            let name = case u.is_type {
+              True -> "type " <> u.name
+              False -> u.name
+            }
+            case u.alias {
+              Some(a) -> t(name <> " as " <> a)
+              None -> t(name)
+            }
+            |> mk(u.span)
+          }),
+          "}",
+        ),
+      ])
+  }
+  let alias = case i.alias {
+    Some(a) -> t(" as " <> a)
+    None -> doc.empty
+  }
+  doc.concat([t("import "), t(i.module) |> mk(i.module_span), uq, alias])
+  |> mk(i.span)
+}
+
+fn publicity(p: ast.Publicity) -> Doc {
+  case p {
+    ast.Public -> t("pub ")
+    ast.Private -> doc.empty
+  }
+}
+
+fn docs(lines: List(String)) -> Doc {
+  doc.concat(
+    list.map(lines, fn(l) { doc.concat([t("///" <> l), doc.hard_line]) }),
+  )
+}
+
+fn attributes(attrs: List(ast.Attribute)) -> Doc {
+  doc.concat(
+    list.map(attrs, fn(a) {
+      let args = case a.args {
+        [] -> doc.empty
+        args ->
+          doc.comma_list(
+            "(",
+            list.map(args, fn(arg) {
+              case arg {
+                ast.AttrName(n) -> t(n)
+                ast.AttrString(s) -> t("\"" <> s <> "\"")
+              }
+            }),
+            ")",
+          )
+      }
+      doc.concat([t("@" <> a.name) |> mk(a.span), args, doc.hard_line])
+    }),
+  )
+}
+
+fn item_doc(it: Item, plan: Plan) -> Doc {
+  case it {
+    ast.Function(_, name, _, clauses) ->
+      case clauses {
+        [c] -> function_doc(name, c, plan)
+        // Not lowered (only happens if lowering reported errors).
+        _ -> t("// invalid function " <> name)
+      }
+    ast.CustomType(
+      span,
+      d,
+      attrs,
+      p,
+      opaque_,
+      name,
+      name_span,
+      params,
+      variants,
+    ) -> {
+      let head =
+        doc.concat([
+          docs(d),
+          attributes(attrs),
+          publicity(p),
+          case opaque_ {
+            True -> t("opaque ")
+            False -> doc.empty
+          },
+          t("type "),
+          t(name) |> mk(name_span),
+          type_params(params),
+        ])
+      let body = case variants {
+        [] -> t(" {}")
+        _ ->
+          doc.concat([
+            t(" {"),
+            doc.nest(
+              doc.concat(
+                list.map(variants, fn(v) {
+                  doc.concat([doc.hard_line, variant_doc(v)])
+                }),
+              ),
+              2,
+            ),
+            doc.hard_line,
+            t("}"),
+          ])
+      }
+      doc.concat([head, body]) |> mk(span)
+    }
+    ast.TypeAlias(span, d, attrs, p, name, name_span, params, aliased) ->
+      doc.concat([
+        docs(d),
+        attributes(attrs),
+        publicity(p),
+        t("type "),
+        t(name) |> mk(name_span),
+        type_params(params),
+        t(" ="),
+        doc.nest(doc.concat([doc.hard_line, type_doc(aliased)]), 2),
+      ])
+      |> mk(span)
+    ast.ExternalType(span, d, attrs, p, name, name_span, params) ->
+      doc.concat([
+        docs(d),
+        attributes(attrs),
+        publicity(p),
+        t("type "),
+        t(name) |> mk(name_span),
+        type_params(params),
+      ])
+      |> mk(span)
+    ast.Const(span, d, attrs, p, name, name_span, annotation, value) ->
+      doc.concat([
+        docs(d),
+        attributes(attrs),
+        publicity(p),
+        t("const "),
+        t(name) |> mk(name_span),
+        annotation_doc(annotation),
+        t(" = "),
+        expr(value, plan),
+      ])
+      |> mk(span)
+    ast.Import(..) -> doc.empty
+  }
+}
+
+fn type_params(params: List(String)) -> Doc {
+  case params {
+    [] -> doc.empty
+    _ -> t("(" <> string.join(params, ", ") <> ")")
+  }
+}
+
+fn variant_doc(v: ast.Variant) -> Doc {
+  let fields = case v.fields {
+    [] -> doc.empty
+    fs ->
+      doc.comma_list(
+        "(",
+        list.map(fs, fn(f) {
+          case f.label {
+            Some(l) -> doc.concat([t(l <> ": "), type_doc(f.type_)])
+            None -> type_doc(f.type_)
+          }
+          |> mk(f.span)
+        }),
+        ")",
+      )
+  }
+  doc.concat([docs(v.doc), t(v.name), fields]) |> mk(v.span)
+}
+
+fn annotation_doc(t_: Option(Type)) -> Doc {
+  case t_ {
+    Some(ty) -> doc.concat([t(": "), type_doc(ty)])
+    None -> doc.empty
+  }
+}
+
+fn type_doc(ty: Type) -> Doc {
+  case ty {
+    ast.NamedType(s, m, name, args) -> {
+      let n = case m {
+        Some(m) -> m <> "." <> name
+        None -> name
+      }
+      case args {
+        [] -> t(n)
+        _ -> doc.concat([t(n), flat_list("(", list.map(args, type_doc), ")")])
+      }
+      |> mk(s)
+    }
+    ast.VarType(s, n) -> t(n) |> mk(s)
+    ast.HoleType(s, n) -> t(n) |> mk(s)
+    ast.TupleType(s, ts) ->
+      flat_list("#(", list.map(ts, type_doc), ")") |> mk(s)
+    ast.FnType(s, ps, r) ->
+      doc.concat([
+        t("fn"),
+        flat_list("(", list.map(ps, type_doc), ")"),
+        t(" -> "),
+        type_doc(r),
+      ])
+      |> mk(s)
+  }
+}
+
+fn function_doc(name: String, c: Clause, plan: Plan) -> Doc {
+  let params =
+    list.map(c.params, fn(p) {
+      doc.concat([
+        case p.label {
+          Some(l) -> t(l <> " ")
+          None -> doc.empty
+        },
+        pattern(p.pattern, plan),
+        annotation_doc(p.annotation),
+      ])
+      |> mk(p.span)
+    })
+  let ret = case c.return_type {
+    Some(r) -> doc.concat([t(" -> "), type_doc(r)])
+    None -> doc.empty
+  }
+  let body = case c.body {
+    Some(stmts) -> doc.concat([t(" "), block(stmts, plan)])
+    None -> doc.empty
+  }
+  doc.concat([
+    docs(c.doc),
+    attributes(c.attributes),
+    publicity(c.publicity),
+    t("fn "),
+    t(name) |> mk(c.name_span),
+    doc.comma_list("(", params, ")"),
+    ret,
+    body,
+  ])
+  |> mk(c.span)
+}
+
+/// `{ ... }` with one statement per line.
+fn block(stmts: List(Statement), plan: Plan) -> Doc {
+  case stmts {
+    [] -> t("{ Nil }")
+    _ ->
+      doc.concat([
+        t("{"),
+        doc.nest(doc.concat([doc.hard_line, statements(stmts, plan)]), 2),
+        doc.hard_line,
+        t("}"),
       ])
   }
 }
 
-fn generate_cond(
-  clauses: List(ast.CondClause),
-  single_variants: Set(String),
-) -> String {
-  case clauses {
-    [] -> "panic as \"No cond clause matched\""
-    [ast.CondClause(cond_expr, body_expr), ..rest] -> {
-      case cond_expr {
-        ast.IdentExpr("True") | ast.IdentExpr("_") ->
-          generate_expression(body_expr, single_variants)
-        _ -> {
-          let c = generate_expression(cond_expr, single_variants)
-          let b = generate_expression(body_expr, single_variants)
-          let r = generate_cond(rest, single_variants)
-          "case "
-          <> c
-          <> " {\n  True -> "
-          <> b
-          <> "\n  False -> {\n    "
-          <> r
-          <> "\n  }\n}"
-        }
-      }
-    }
+/// A block that may stay on one line if it's a single short expression.
+fn soft_block(stmts: List(Statement), plan: Plan) -> Doc {
+  case stmts {
+    [ast.Expression(e)] ->
+      doc.group(
+        doc.concat([
+          t("{"),
+          doc.nest(doc.concat([doc.line, expr(e, plan)]), 2),
+          doc.line,
+          t("}"),
+        ]),
+      )
+    _ -> block(stmts, plan)
   }
 }
 
-fn generate_case_clause(
-  clause: ast.CaseClause,
-  single_variants: Set(String),
-) -> String {
-  let pat_str =
-    clause.patterns
-    |> list.map(fn(p) { generate_expression(p, single_variants) })
-    |> string.join(" | ")
+fn statements(stmts: List(Statement), plan: Plan) -> Doc {
+  doc.join(list.map(stmts, statement(_, plan)), doc.hard_line)
+}
 
-  let guard_str = case clause.guard {
-    [] -> ""
-    [g] -> " if " <> generate_expression(g, single_variants)
-    _ -> ""
+fn statement(stmt: Statement, plan: Plan) -> Doc {
+  case stmt {
+    ast.Assign(s, p, annotation, value) -> {
+      let assert_ = case irrefutable(p, plan) || same_constructor(p, value) {
+        True -> "let "
+        False -> "let assert "
+      }
+      doc.concat([
+        t(assert_),
+        pattern(p, plan),
+        annotation_doc(annotation),
+        t(" ="),
+        assigned(value, plan),
+      ])
+      |> mk(s)
+    }
+    ast.Expression(e) -> expr(e, plan)
+    // Only reachable when lowering failed and reported an error.
+    ast.Return(s, e) -> expr(e, plan) |> mk(s)
+    ast.Use(s, ps, call) -> {
+      let pats = case ps {
+        [] -> t("use <- ")
+        _ ->
+          doc.concat([
+            t("use "),
+            doc.join(
+              list.map(ps, fn(p) {
+                doc.concat([
+                  pattern(p.pattern, plan),
+                  annotation_doc(p.annotation),
+                ])
+                |> mk(p.span)
+              }),
+              t(", "),
+            ),
+            t(" <- "),
+          ])
+      }
+      doc.concat([pats, expr(call, plan)]) |> mk(s)
+    }
+    ast.Assert(s, e, m) ->
+      doc.concat([
+        t("assert "),
+        expr(e, plan),
+        case m {
+          Some(m) -> doc.concat([t(" as "), expr(m, plan)])
+          None -> doc.empty
+        },
+      ])
+      |> mk(s)
   }
+}
 
-  let body_str = generate_expression(clause.body, single_variants)
-  pat_str <> guard_str <> " -> " <> body_str
+fn irrefutable(p: Pattern, plan: Plan) -> Bool {
+  case p {
+    ast.PVar(..) | ast.PDiscard(..) -> True
+    ast.PAssign(_, inner, _) -> irrefutable(inner, plan)
+    ast.PTuple(_, ps) -> list.all(ps, irrefutable(_, plan))
+    ast.PConstructor(_, module, name, args, _) -> {
+      let single = case module {
+        None -> set.contains(plan.single, name)
+        Some(m) ->
+          case dict.get(plan.single_qualified, m) {
+            Ok(ctors) -> set.contains(ctors, name)
+            Error(_) -> False
+          }
+      }
+      single
+      && list.all(args, fn(a) {
+        case a.value {
+          Some(v) -> irrefutable(v, plan)
+          None -> True
+        }
+      })
+    }
+    _ -> False
+  }
+}
+
+// --- Expressions ----------------------------------------------------------------------
+
+/// Precedence of an expression when used as an operand; 100 means atomic.
+fn expr_precedence(e: Expr) -> Int {
+  case e {
+    ast.BinaryOp(_, op, _, _) -> ast.precedence(op)
+    ast.Echo(_, None, _) -> 100
+    ast.Echo(..) | ast.Panic(..) | ast.Todo(..) -> 0
+    _ -> 100
+  }
+}
+
+fn operand(e: Expr, min: Int, plan: Plan) -> Doc {
+  case expr_precedence(e) < min {
+    True -> doc.concat([t("{ "), expr(e, plan), t(" }")])
+    False -> expr(e, plan)
+  }
+}
+
+fn expr(e: Expr, plan: Plan) -> Doc {
+  expr_inner(e, plan) |> mk(e.span)
+}
+
+fn expr_inner(e: Expr, plan: Plan) -> Doc {
+  case e {
+    ast.Int(_, text) | ast.Float(_, text) -> t(text)
+    ast.String(_, parts) -> string_doc(parts, plan)
+    ast.RawString(_, v) -> t("\"" <> lexer.escape_gleam_string(v) <> "\"")
+    ast.Var(_, n) ->
+      case dict.get(plan.helpers, n) {
+        Ok(reference) -> t(reference)
+        Error(_) -> t(n)
+      }
+    ast.Constructor(_, Some(m), n) -> t(m <> "." <> n)
+    ast.Constructor(_, None, n) -> t(n)
+    ast.Hole(_) -> t("_")
+    ast.FieldAccess(_, base, field, fs) ->
+      doc.concat([operand(base, 100, plan), t("."), t(field) |> mk(fs)])
+    ast.TupleIndex(_, base, i) ->
+      doc.concat([operand(base, 100, plan), t("." <> int.to_string(i))])
+    ast.Call(_, f, args) -> {
+      let callee = case f {
+        ast.Var(..)
+        | ast.FieldAccess(..)
+        | ast.Constructor(..)
+        | ast.Call(..)
+        | ast.TupleIndex(..) -> expr(f, plan)
+        _ -> doc.concat([t("{ "), expr(f, plan), t(" }")])
+      }
+      doc.concat([
+        callee,
+        doc.comma_list("(", list.map(args, arg(_, plan)), ")"),
+      ])
+    }
+    ast.RecordUpdate(_, c, base, updates) ->
+      doc.concat([
+        expr(c, plan),
+        doc.comma_list(
+          "(",
+          [
+            doc.concat([t(".."), expr(base, plan)]),
+            ..list.map(updates, arg(_, plan))
+          ],
+          ")",
+        ),
+      ])
+    ast.Tuple(_, es) -> doc.comma_list("#(", list.map(es, expr(_, plan)), ")")
+    ast.List(_, es, tail) -> {
+      let tail = case tail {
+        Some(tl) -> [doc.concat([t(".."), expr(tl, plan)])]
+        None -> []
+      }
+      doc.comma_list("[", list.append(list.map(es, expr(_, plan)), tail), "]")
+    }
+    ast.Map(s, None, pairs) -> {
+      let from_list = helper(plan, "$dict.from_list")
+      doc.concat([
+        t(from_list),
+        t("("),
+        doc.comma_list("[", list.map(pairs, pair_doc(_, plan)), "]"),
+        t(")"),
+      ])
+      |> mk(s)
+    }
+    ast.Map(_, Some(base), pairs) -> {
+      let insert = helper(plan, "$dict.insert")
+      list.fold(pairs, expr(base, plan), fn(acc, kv) {
+        doc.concat([
+          t(insert),
+          doc.comma_list("(", [acc, expr(kv.0, plan), expr(kv.1, plan)], ")"),
+        ])
+      })
+    }
+    ast.Fn(_, params, ret, body) -> {
+      let params =
+        list.map(params, fn(p) {
+          doc.concat([pattern(p.pattern, plan), annotation_doc(p.annotation)])
+          |> mk(p.span)
+        })
+      doc.concat([
+        t("fn"),
+        doc.comma_list("(", params, ")"),
+        case ret {
+          Some(r) -> doc.concat([t(" -> "), type_doc(r)])
+          None -> doc.empty
+        },
+        t(" "),
+        soft_block(body, plan),
+      ])
+    }
+    ast.Block(_, stmts) -> soft_block(stmts, plan)
+    ast.If(_, c, then, el) -> {
+      let false_branch = case el {
+        Some(stmts) -> branch(stmts, plan)
+        None -> t(" Nil")
+      }
+      case_doc([expr(c, plan)], [
+        doc.concat([t("True ->"), branch(then, plan)]),
+        doc.concat([t("False ->"), false_branch]),
+      ])
+    }
+    ast.Cond(..) -> t("todo as \"cond should have been lowered\"")
+    ast.Case(_, subjects, clauses) ->
+      case_doc(
+        list.map(subjects, expr(_, plan)),
+        list.map(clauses, case_clause(_, plan)),
+      )
+    ast.BinaryOp(_, ast.Pipe, _, _) -> {
+      // Like `gleam format`: a pipeline is either on one line, or has every
+      // step on its own line.
+      let #(first, steps) = pipe_chain(e, [])
+      let p = ast.precedence(ast.Pipe)
+      doc.group(
+        doc.concat([
+          operand(first, p, plan),
+          ..list.map(steps, fn(step) {
+            doc.concat([doc.line, t("|> "), operand(step, p + 1, plan)])
+          })
+        ]),
+      )
+    }
+    ast.BinaryOp(_, op, l, r) -> {
+      let p = ast.precedence(op)
+      doc.concat([
+        operand(l, p, plan),
+        t(" " <> ast.binop_to_string(op) <> " "),
+        operand(r, p + 1, plan),
+      ])
+    }
+    ast.Negate(_, x) ->
+      case x {
+        // `- -5` is not valid Gleam.
+        ast.Int(_, "-" <> _) | ast.Float(_, "-" <> _) ->
+          doc.concat([t("-{ "), expr(x, plan), t(" }")])
+        _ -> doc.concat([t("-"), operand(x, 100, plan)])
+      }
+    ast.NegateFloat(_, x) ->
+      doc.concat([
+        t(helper(plan, "$float.negate") <> "("),
+        expr(x, plan),
+        t(")"),
+      ])
+    ast.Not(_, x) -> doc.concat([t("!"), operand(x, 100, plan)])
+    ast.Echo(_, None, _) -> t("echo")
+    ast.Echo(_, Some(x), m) ->
+      doc.concat([
+        t("echo "),
+        expr(x, plan),
+        case m {
+          Some(m) -> doc.concat([t(" as "), expr(m, plan)])
+          None -> doc.empty
+        },
+      ])
+    // Only reachable when lowering reported an error.
+    ast.Try(_, x) -> expr(x, plan)
+    ast.Panic(_, m) -> keyword_message("panic", m, plan)
+    ast.Todo(_, m) -> keyword_message("todo", m, plan)
+    ast.BitArray(_, segs) ->
+      doc.comma_list("<<", list.map(segs, segment(_, expr(_, plan))), ">>")
+  }
+}
+
+fn helper(plan: Plan, name: String) -> String {
+  dict.get(plan.helpers, name) |> result.unwrap(string.drop_start(name, 1))
+}
+
+fn keyword_message(kw: String, m: Option(Expr), plan: Plan) -> Doc {
+  case m {
+    Some(m) -> doc.concat([t(kw <> " as "), operand(m, 100, plan)])
+    None -> t(kw)
+  }
+}
+
+fn pair_doc(kv: #(Expr, Expr), plan: Plan) -> Doc {
+  doc.comma_list("#(", [expr(kv.0, plan), expr(kv.1, plan)], ")")
+}
+
+fn arg(a: ast.Arg, plan: Plan) -> Doc {
+  case a.label, a.value {
+    Some(l), Some(v) -> doc.concat([t(l <> ": "), expr(v, plan)])
+    Some(l), None -> t(l <> ": " <> l)
+    None, Some(v) -> expr(v, plan)
+    None, None -> doc.empty
+  }
+  |> mk(a.span)
+}
+
+fn string_doc(parts: List(ast.StringPart), plan: Plan) -> Doc {
+  let pieces =
+    list.map(parts, fn(p) {
+      case p {
+        // Only the content is marked: it is identical in both languages.
+        ast.Text(raw, s) ->
+          doc.concat([
+            t("\""),
+            t(lexer.to_gleam_string_content(raw)) |> mk(s),
+            t("\""),
+          ])
+        // `<>` has precedence 5 (and is associative); anything looser must
+        // be wrapped.
+        ast.Interpolation(x, _) -> operand(x, 5, plan)
+      }
+    })
+  case pieces, parts {
+    [], _ -> t("\"\"")
+    [single], [ast.Interpolation(..)] -> doc.concat([t("\"\" <> "), single])
+    [single], _ -> single
+    _, _ -> doc.join(pieces, t(" <> "))
+  }
+}
+
+fn case_doc(subjects: List(Doc), clauses: List(Doc)) -> Doc {
+  doc.concat([
+    t("case "),
+    doc.join(subjects, t(", ")),
+    t(" {"),
+    doc.nest(
+      doc.concat(list.map(clauses, fn(c) { doc.concat([doc.hard_line, c]) })),
+      2,
+    ),
+    doc.hard_line,
+    t("}"),
+  ])
+}
+
+fn case_clause(c: ast.CaseClause, plan: Plan) -> Doc {
+  let alternatives =
+    list.map(c.alternatives, fn(alt) {
+      doc.join(list.map(alt, pattern(_, plan)), t(", "))
+    })
+  doc.concat([
+    doc.join(alternatives, t(" | ")),
+    case c.guard {
+      Some(g) -> doc.concat([t(" if "), expr(g, plan)])
+      None -> doc.empty
+    },
+    t(" ->"),
+    case c.body {
+      ast.Block(_, [ast.Expression(e)]) -> arm_body(e, plan)
+      ast.Block(_, stmts) -> doc.concat([t(" "), block(stmts, plan)])
+      body -> arm_body(body, plan)
+    },
+  ])
+  |> mk(c.span)
+}
+
+/// The body of a case arm goes on the same line if it fits, otherwise on the
+/// next line, indented (blocks always stay on the same line).
+fn arm_body(e: Expr, plan: Plan) -> Doc {
+  case e {
+    ast.Block(..) | ast.Fn(..) -> doc.concat([t(" "), expr(e, plan)])
+    // Multi-line constructs always go on their own line, like gleam format.
+    ast.Case(..) | ast.If(..) ->
+      doc.nest(doc.concat([doc.hard_line, expr(e, plan)]), 2)
+    _ -> doc.group(doc.nest(doc.concat([doc.line, expr(e, plan)]), 2))
+  }
+}
+
+/// A case/if branch body: a lone expression stays inline, anything else
+/// becomes a block.
+fn branch(stmts: List(Statement), plan: Plan) -> Doc {
+  case stmts {
+    [ast.Expression(e)] -> arm_body(e, plan)
+    _ -> doc.concat([t(" "), block(stmts, plan)])
+  }
+}
+
+fn segment(seg: ast.Segment(v), value: fn(v) -> Doc) -> Doc {
+  let opts = case seg.options {
+    [] -> doc.empty
+    opts ->
+      doc.concat([
+        t(":"),
+        doc.join(
+          list.map(opts, fn(o) {
+            case o.arg {
+              Some(a) -> doc.concat([t(o.name <> "("), value(a), t(")")])
+              None -> t(o.name)
+            }
+          }),
+          t("-"),
+        ),
+      ])
+  }
+  doc.concat([value(seg.value), opts]) |> mk(seg.span)
+}
+
+// --- Patterns -------------------------------------------------------------------------
+
+fn pattern(p: Pattern, plan: Plan) -> Doc {
+  pattern_inner(p, plan) |> mk(p.span)
+}
+
+fn pattern_inner(p: Pattern, plan: Plan) -> Doc {
+  case p {
+    ast.PInt(_, text) | ast.PFloat(_, text) -> t(text)
+    ast.PString(_, raw) -> t("\"" <> lexer.to_gleam_string_content(raw) <> "\"")
+    ast.PVar(_, n) | ast.PDiscard(_, n) -> t(n)
+    ast.PTuple(_, ps) ->
+      doc.comma_list("#(", list.map(ps, pattern(_, plan)), ")")
+    ast.PList(_, ps, tail) -> {
+      let tail = case tail {
+        Some(ast.PDiscard(_, "_")) -> [t("..")]
+        Some(tl) -> [doc.concat([t(".."), pattern(tl, plan)])]
+        None -> []
+      }
+      doc.comma_list(
+        "[",
+        list.append(list.map(ps, pattern(_, plan)), tail),
+        "]",
+      )
+    }
+    ast.PConstructor(_, m, name, args, spread) -> {
+      let n = case m {
+        Some(m) -> m <> "." <> name
+        None -> name
+      }
+      let args =
+        list.map(args, fn(a) {
+          case a.label, a.value {
+            Some(l), Some(v) -> doc.concat([t(l <> ": "), pattern(v, plan)])
+            Some(l), None -> t(l <> ": " <> l)
+            None, Some(v) -> pattern(v, plan)
+            None, None -> doc.empty
+          }
+          |> mk(a.span)
+        })
+      let args = case spread {
+        True -> list.append(args, [t("..")])
+        False -> args
+      }
+      case args {
+        [] -> t(n)
+        _ -> doc.concat([t(n), doc.comma_list("(", args, ")")])
+      }
+    }
+    ast.PAssign(_, inner, name) ->
+      doc.concat([pattern(inner, plan), t(" as " <> name)])
+    ast.PConcat(_, prefix, name, rest) ->
+      doc.concat([
+        t("\"" <> lexer.to_gleam_string_content(prefix) <> "\""),
+        case name {
+          Some(n) -> t(" as " <> n)
+          None -> doc.empty
+        },
+        t(" <> "),
+        pattern(rest, plan),
+      ])
+    ast.PBitArray(_, segs) ->
+      doc.comma_list("<<", list.map(segs, segment(_, pattern(_, plan))), ">>")
+  }
+}
+
+fn pipe_chain(e: Expr, acc: List(Expr)) -> #(Expr, List(Expr)) {
+  case e {
+    ast.BinaryOp(_, ast.Pipe, l, r) -> pipe_chain(l, [r, ..acc])
+    _ -> #(e, acc)
+  }
+}
+
+fn flat_list(open: String, docs: List(Doc), close: String) -> Doc {
+  doc.concat([t(open), doc.join(docs, t(", ")), t(close)])
+}
+
+/// Right hand side of `let x =`: bracketed things hug the `=`, operator
+/// chains move to the next line when they don't fit.
+fn assigned(e: Expr, plan: Plan) -> Doc {
+  case e {
+    ast.BinaryOp(..) ->
+      doc.group(doc.nest(doc.concat([doc.line, expr(e, plan)]), 2))
+    _ -> doc.concat([t(" "), expr(e, plan)])
+  }
+}
+
+/// `One(x) = One(4)` can't fail even if `One`'s type has other variants.
+fn same_constructor(p: Pattern, value: Expr) -> Bool {
+  let name = case value {
+    ast.Call(_, ast.Constructor(_, m, n), _) | ast.Constructor(_, m, n) ->
+      Some(#(m, n))
+    _ -> None
+  }
+  case p, name {
+    ast.PConstructor(_, pm, pn, args, _), Some(#(m, n)) ->
+      pm == m
+      && pn == n
+      && list.all(args, fn(a) {
+        case a.value {
+          None -> True
+          Some(ast.PVar(..)) | Some(ast.PDiscard(..)) -> True
+          Some(_) -> False
+        }
+      })
+    _, _ -> False
+  }
 }

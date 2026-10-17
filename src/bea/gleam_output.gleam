@@ -1,0 +1,348 @@
+//// Rewrites Gleam compiler and runtime output so it points at `.bea` files.
+////
+//// Gleam reports errors against the generated code in `.beabuild/src`. This
+//// module recognises the locations Gleam prints (error headers like
+//// `┌─ /path/.beabuild/src/app.gleam:12:5`, `echo` and stack trace
+//// locations like `src/app.gleam:12`), translates them with the source maps
+//// and re-renders the code snippet using the original Bea source.
+////
+//// It's a line-by-line state machine so output can be streamed while Gleam
+//// is still running.
+
+import bea/project.{type Module}
+import bea/sourcemap
+import bea/span.{Span}
+import gleam/dict.{type Dict}
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/regexp
+import gleam/string
+
+pub opaque type Rewriter {
+  Rewriter(
+    modules: Dict(String, Module),
+    build_dir: String,
+    src_dir: String,
+    colour: Bool,
+    snippet: Option(Snippet),
+  )
+}
+
+type Snippet {
+  Snippet(
+    module: Module,
+    gleam_line: Int,
+    gleam_column: Int,
+    lines: List(String),
+  )
+}
+
+pub fn new(
+  modules: Dict(String, Module),
+  build_dir: String,
+  src_dir: String,
+  colour: Bool,
+) -> Rewriter {
+  Rewriter(modules, build_dir, src_dir, colour, None)
+}
+
+/// Feed one line of output; returns the lines to print now.
+pub fn feed(r: Rewriter, line: String) -> #(Rewriter, List(String)) {
+  case r.snippet {
+    Some(snippet) ->
+      case is_snippet_line(line) {
+        True -> #(
+          Rewriter(
+            ..r,
+            snippet: Some(Snippet(..snippet, lines: [line, ..snippet.lines])),
+          ),
+          [],
+        )
+        False -> {
+          let rendered = render_snippet(r, snippet)
+          let #(r, more) = feed(Rewriter(..r, snippet: None), line)
+          #(r, list.append(rendered, more))
+        }
+      }
+    None ->
+      case header(r, line) {
+        Some(#(module, gleam_line, gleam_column)) -> #(
+          Rewriter(
+            ..r,
+            snippet: Some(Snippet(module, gleam_line, gleam_column, [])),
+          ),
+          [],
+        )
+        None -> #(r, [paint(r, rewrite_copies(r, rewrite_locations(r, line)))])
+      }
+  }
+}
+
+/// Flush anything still buffered.
+pub fn finish(r: Rewriter) -> List(String) {
+  case r.snippet {
+    Some(snippet) -> render_snippet(r, snippet)
+    None -> []
+  }
+}
+
+fn paint(r: Rewriter, line: String) -> String {
+  case r.colour {
+    False -> line
+    True ->
+      case line {
+        "error: " <> rest ->
+          "\u{001b}[1m\u{001b}[31merror\u{001b}[0m\u{001b}[1m: "
+          <> rest
+          <> "\u{001b}[0m"
+        "warning: " <> rest ->
+          "\u{001b}[1m\u{001b}[33mwarning\u{001b}[0m\u{001b}[1m: "
+          <> rest
+          <> "\u{001b}[0m"
+        _ -> line
+      }
+  }
+}
+
+fn is_snippet_line(line: String) -> Bool {
+  let trimmed = string.trim_start(line)
+  case trimmed {
+    "│" <> _ | "·" <> _ -> True
+    _ ->
+      // `12 │ code`
+      case string.split_once(trimmed, " ") {
+        Ok(#(number, rest)) ->
+          int.parse(number) |> option.from_result |> option.is_some
+          && string.starts_with(string.trim_start(rest), "│")
+        Error(_) -> False
+      }
+  }
+}
+
+/// Recognise `┌─ path:line:column` for one of our generated modules.
+fn header(r: Rewriter, line: String) -> Option(#(Module, Int, Int)) {
+  case string.split_once(string.trim_start(line), "┌─ ") {
+    Ok(#("", location)) ->
+      case parse_location(string.trim(location)) {
+        Some(#(path, l, c)) ->
+          case lookup(r, path) {
+            Some(m) -> Some(#(m, l, c))
+            None -> None
+          }
+        None -> None
+      }
+    _ -> None
+  }
+}
+
+fn parse_location(text: String) -> Option(#(String, Int, Int)) {
+  case string.split(text, ":") |> list.reverse {
+    [c, l, ..path] ->
+      case int.parse(l), int.parse(c) {
+        Ok(l), Ok(c) -> Some(#(string.join(list.reverse(path), ":"), l, c))
+        _, _ -> None
+      }
+    _ -> None
+  }
+}
+
+fn lookup(r: Rewriter, path: String) -> Option(Module) {
+  let absolute = case string.starts_with(path, "/") {
+    True -> path
+    False -> r.build_dir <> "/" <> path
+  }
+  dict.get(r.modules, absolute) |> option.from_result
+}
+
+/// Map a 1-based gleam line/column to a bea span.
+fn map_position(
+  module: Module,
+  line: Int,
+  column: Int,
+  width: Int,
+) -> span.Span {
+  let map = module.map
+  let line_start = span.line_start(map.gleam, line - 1)
+  let text = span.line_text(map.gleam, line - 1)
+  let prefix = string.slice(text, 0, column - 1)
+  let start = line_start + string.byte_size(prefix)
+  let selected = string.slice(text, column - 1, int.max(width, 1))
+  let end = start + int.max(string.byte_size(selected), 1)
+  case sourcemap.to_bea_span(map, Span(start, end)) {
+    Some(s) -> s
+    None ->
+      case sourcemap.bea_line_for_gleam_line(map, line - 1) {
+        Some(l) -> {
+          let s = span.line_start(map.bea, l)
+          Span(s, s)
+        }
+        None -> Span(0, 0)
+      }
+  }
+}
+
+fn render_snippet(r: Rewriter, snippet: Snippet) -> List(String) {
+  let lines = list.reverse(snippet.lines)
+  // Find the caret line to learn the width and label of the highlight.
+  let #(width, label) =
+    lines
+    |> list.filter(fn(l) { string.contains(l, "^") })
+    |> list.last
+    |> fn(found) {
+      case found {
+        Ok(l) -> {
+          let after_bar = case string.split_once(l, "│") {
+            Ok(#(_, rest)) -> rest
+            Error(_) -> l
+          }
+          let carets =
+            string.to_graphemes(after_bar)
+            |> list.drop_while(fn(c) { c != "^" })
+          let width = list.length(list.take_while(carets, fn(c) { c == "^" }))
+          let label =
+            carets
+            |> list.drop_while(fn(c) { c == "^" })
+            |> string.concat
+            |> string.trim
+          // Multi-line highlights (`╰───^`) don't give us the width.
+          let multiline = list.any(lines, fn(l) { string.contains(l, "╭") })
+          case multiline {
+            True -> #(0, label)
+            False -> #(width, label)
+          }
+        }
+        Error(_) -> #(1, "")
+      }
+    }
+  let module = snippet.module
+  let bea_span =
+    map_position(module, snippet.gleam_line, snippet.gleam_column, width)
+  let index = module.map.bea
+  let start = span.position(index, bea_span.start)
+  let end = span.position(index, bea_span.end)
+  let text = span.line_text(index, start.line)
+  let column_chars =
+    string.length(span.text(
+      text,
+      Span(0, int.min(start.column, string.byte_size(text))),
+    ))
+  let multiline = list.any(lines, fn(l) { string.contains(l, "╭") })
+  let highlight = case end.line == start.line && !multiline {
+    True -> int.max(string.length(span.text(module.source, bea_span)), 1)
+    False -> int.max(string.length(text) - column_chars, 1)
+  }
+  let number = int.to_string(start.line + 1)
+  let gutter = string.repeat(" ", string.length(number))
+  let location =
+    project.display_path(module.bea_path)
+    <> ":"
+    <> number
+    <> ":"
+    <> int.to_string(column_chars + 1)
+  let caret = string.repeat("^", highlight)
+  let caret = case r.colour {
+    True -> "\u{001b}[31m" <> caret <> " " <> label <> "\u{001b}[0m"
+    False -> string.trim_end(caret <> " " <> label)
+  }
+  [
+    gutter <> " ┌─ " <> location,
+    gutter <> " │",
+    number <> " │ " <> text,
+    gutter <> " │ " <> string.repeat(" ", column_chars) <> caret,
+  ]
+}
+
+/// Rewrite `src/app.gleam:12` style locations (echo, stack traces) and
+/// absolute `.beabuild/src/...` paths.
+pub fn rewrite_locations(r: Rewriter, line: String) -> String {
+  case string.contains(line, ".gleam") {
+    False -> line
+    True -> {
+      let assert Ok(re) =
+        regexp.from_string(
+          "([^\\s\"'\\x1b]*?)(src/[a-z][a-z0-9_/]*\\.gleam)(:(\\d+))?(:(\\d+))?",
+        )
+      regexp.match_map(re, line, fn(m) {
+        case m.submatches {
+          [prefix, Some(rel), ..rest] -> {
+            let raw_prefix = option.unwrap(prefix, "")
+            let prefix = strip_ansi_tail(raw_prefix)
+            let ansi = string.drop_end(raw_prefix, string.length(prefix))
+            let ours =
+              prefix == ""
+              || string.ends_with(prefix, project.build_dir_name <> "/")
+            let line_no = case rest {
+              [_, Some(l), ..] -> int.parse(l) |> option.from_result
+              _ -> None
+            }
+            case ours, lookup(r, rel) {
+              True, Some(module) -> {
+                let path = project.display_path(module.bea_path)
+                case line_no {
+                  Some(l) -> {
+                    let bea_line =
+                      sourcemap.bea_line_for_gleam_line(module.map, l - 1)
+                      |> option.map(fn(x) { x + 1 })
+                      |> option.unwrap(l)
+                    ansi <> path <> ":" <> int.to_string(bea_line)
+                  }
+                  None -> ansi <> path
+                }
+              }
+              // Hand written Gleam files are copied verbatim from src/.
+              True, None ->
+                prefix_ansi(m.content, rel, fn(rel) {
+                  project.display_path(
+                    r.src_dir <> "/" <> string.drop_start(rel, 4),
+                  )
+                })
+              _, _ -> m.content
+            }
+          }
+          _ -> m.content
+        }
+      })
+    }
+  }
+}
+
+/// `\u{1b}[90msrc/app.gleam` leaves `[90m` in front of the path.
+fn strip_ansi_tail(prefix: String) -> String {
+  case string.split(prefix, "m") |> list.reverse {
+    [last, ..rest] if rest != [] ->
+      case string.starts_with(prefix, "[") {
+        True -> last
+        False -> prefix
+      }
+    _ -> prefix
+  }
+}
+
+/// Absolute paths of files copied into the build directory point back at
+/// the originals in the source directory.
+fn rewrite_copies(r: Rewriter, line: String) -> String {
+  let build_src = r.build_dir <> "/src/"
+  case string.contains(line, build_src) {
+    True ->
+      string.replace(line, build_src, project.display_path(r.src_dir) <> "/")
+    False -> line
+  }
+}
+
+/// Replace the `src/...` part of a matched location, keeping anything
+/// before it (an ANSI colour code) and after it (`:line`).
+fn prefix_ansi(
+  content: String,
+  rel: String,
+  f: fn(String) -> String,
+) -> String {
+  case string.split_once(content, rel) {
+    Ok(#(before, after)) ->
+      case string.ends_with(before, project.build_dir_name <> "/") {
+        True -> content
+        False -> before <> f(rel) <> after
+      }
+    Error(_) -> content
+  }
+}

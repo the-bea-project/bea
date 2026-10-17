@@ -1,0 +1,109 @@
+import gleam/dict
+import gleam/int
+import gleam/io
+import gleam/list
+import gleam/option
+import gleam/string
+
+pub type Point {
+  Point(x: Int, y: Int)
+}
+
+def describe(p: Point) -> String {
+  "(#{int.to_string(p.x)}, #{int.to_string(p.y)})"
+}
+
+def take_two([a, b | _]) {
+  a + b
+}
+
+def take_two(_) {
+  0
+}
+
+def starts(s: String) -> String {
+  case s {
+    "bea" <> rest -> "bea + " <> rest
+    "gl" as prefix <> rest -> prefix <> "|" <> rest
+    _ -> "other"
+  }
+}
+
+def both(a, b) -> String {
+  case a, b {
+    0, 0 -> "zeros"
+    0, _ | _, 0 -> "one zero"
+    _, _ -> "none"
+  }
+}
+
+def scale(by factor: Int, point p: Point) -> Point {
+  Point(p | x: p.x * factor, y: p.y * factor)
+}
+
+pub def main() {
+  // Precedence
+  io.println(int.to_string(1 + 2 * 3))
+  io.println(int.to_string(10 - 4 - 3))
+  io.println(string.inspect(1 + 1 == 2 and 3 > 2 or False))
+  io.println(string.inspect(not (1 == 2)))
+  x = 5
+  y = -x
+  io.println(int.to_string(y + -3))
+  io.println(int.to_string(0xFF + 0b101 + 0o10 + 1_000))
+  io.println(string.inspect(1.5 <. 2.0))
+  io.println(string.inspect(2.5e2 /. 2.0))
+
+  // Lists
+  rest = [3, 4]
+  io.println(string.inspect([1, 2 | rest]))
+  io.println(string.inspect([0, ..rest]))
+  io.println(int.to_string(take_two([10, 20, 30])))
+  io.println(int.to_string(take_two([10])))
+
+  // Strings
+  name = "Bea"
+  io.println("Hello, #{name}! #{int.to_string(1 + 1)} \"quoted\" \#{not interpolated}")
+  io.println("nested: #{string.join(["a", "b"], ", ")} and #{string.uppercase("x" <> "y")}")
+  io.println("cmp: #{string.inspect(1 == 1)}")
+  io.println(`raw \n "string"`)
+  io.println(starts("bealang"))
+  io.println(starts("gleam"))
+  io.println(starts("x"))
+
+  // Tuples
+  t = (1, ("a", 2.5))
+  io.println(string.inspect(t.1.0))
+  single = (42,)
+  io.println(string.inspect(single))
+  io.println(string.inspect(#(1, 2)))
+  io.println(string.inspect(()))
+
+  // Records & labels
+  p = Point(x: 1, y: 2)
+  io.println(describe(scale(point: p, by: 3)))
+  Point(x:, y:) = p
+  io.println(int.to_string(x + y))
+
+  // Maps
+  m = %{"a": 1, "b": 2}
+  m2 = %{m | "c": 3, "a": 10}
+  io.println(string.inspect(dict.to_list(m2) |> list.sort(fn(a, b) { string.compare(a.0, b.0) })))
+  io.println(string.inspect(dict.size(%{})))
+
+  // Options, qualified constructors, captures
+  o = option.Some(3)
+  io.println(string.inspect(option.unwrap(o, 0)))
+  add = fn(a, b) { a + b }
+  inc = add(1, _)
+  io.println(int.to_string(inc(41)))
+  io.println(string.inspect(list.map([(1, 2), (3, 4)], fn((a, b)) { a * b })))
+
+  // case with multiple subjects and alternatives
+  io.println(both(0, 0))
+  io.println(both(0, 3))
+  io.println(both(3, 3))
+
+  assert 1 + 1 == 2
+  io.println("done")
+}

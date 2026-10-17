@@ -1,0 +1,120 @@
+import gleam/int
+import gleam/io
+
+def classify(n: Int) -> String {
+  if n < 0 {
+    io.println("negative!")
+    return "neg"
+  }
+  if n == 0 {
+    return "zero"
+  }
+  label = if n > 100 {
+    return "huge"
+  } else {
+    "pos"
+  }
+  label <> "_" <> int.to_string(n)
+}
+
+def first_even(xs: List(Int)) -> Int {
+  case xs {
+    [] -> {
+      return -1
+    }
+    [x | rest] -> {
+      if x % 2 == 0 {
+        return x
+      }
+      return first_even(rest)
+    }
+  }
+}
+
+// Bindings inside a branch must not leak into the code after it.
+def scoping(c: Bool) -> Int {
+  x = 1
+  if c {
+    x = 2
+    if x > 5 {
+      return 99
+    }
+    io.println("inner x = " <> int.to_string(x))
+  }
+  x
+}
+
+def both(a: Bool, b: Bool) -> String {
+  msg = case a {
+    True -> {
+      if b {
+        return "early"
+      }
+      "a"
+    }
+    False -> "not a"
+  }
+  "got " <> msg
+}
+
+def loud(n: Int) -> Int {
+  io.println("loud called")
+  n
+}
+
+// The returned expression must only be evaluated when the guard passes.
+def lazy(n: Int) -> Int {
+  if n > 0 {
+    return loud(n)
+  }
+  0
+}
+
+def else_return(n: Int) -> String {
+  if n > 1 {
+    io.println("big")
+  } else {
+    return "small"
+  }
+  "after"
+}
+
+def nested_block(n: Int) -> Int {
+  {
+    if n == 3 {
+      return 30
+    }
+  }
+  n
+}
+
+def anon() -> Int {
+  f = fn(x) {
+    if x > 1 {
+      return x * 10
+    }
+    x
+  }
+  f(5) + f(1)
+}
+
+pub def main() {
+  io.println(classify(-5))
+  io.println(classify(0))
+  io.println(classify(500))
+  io.println(classify(7))
+  io.println(int.to_string(first_even([1, 3, 8, 5])))
+  io.println(int.to_string(first_even([1, 3])))
+  io.println(int.to_string(scoping(True)))
+  io.println(int.to_string(scoping(False)))
+  io.println(both(True, True))
+  io.println(both(True, False))
+  io.println(both(False, True))
+  io.println(int.to_string(lazy(0)))
+  io.println(int.to_string(lazy(4)))
+  io.println(else_return(5))
+  io.println(else_return(0))
+  io.println(int.to_string(nested_block(3)))
+  io.println(int.to_string(nested_block(4)))
+  io.println(int.to_string(anon()))
+}

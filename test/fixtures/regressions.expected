@@ -1,0 +1,22 @@
+first
+second
+Ok(3)
+a
+b
+Error("from b")
+piped
+arg
+Ok(3)
+["label: big", "negative", "label: small"]
+#(Ok(2), Error("bad:x"), Ok(6), Ok(4))
+#(2, 0, 4)
+#(Ok(False), Error("bad:z"), Ok(True))
+#(Ok("7"), Error("bad:q"), Ok("0"))
+#(Ok(#(2, 4)), Error("bad:t"))
+#("4", "non-positive")
+Ok(1)
+#(2, 0)
+Ok("bea")
+51
+#(-1.5, -4)
+x is not positive

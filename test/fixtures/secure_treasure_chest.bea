@@ -1,0 +1,33 @@
+import gleam/io
+import gleam/string
+
+pub opaque type TreasureChest(treasure) {
+  TreasureChest(password: String, contents: treasure)
+}
+
+pub def create(
+  password: String,
+  contents: treasure,
+) -> Result(TreasureChest(treasure), String) {
+  case string.length(password) {
+    i if i < 8 -> Error("Password must be at least 8 characters long")
+    _ -> Ok(TreasureChest(password, contents))
+  }
+}
+
+pub def open(
+  chest: TreasureChest(treasure),
+  password: String,
+) -> Result(treasure, String) {
+  if password != chest.password {
+    return Error("Incorrect password")
+  }
+  Ok(chest.contents)
+}
+
+pub def main() {
+  io.println(string.inspect(create("short", 1)))
+  Ok(chest) = create("long enough", "gold")
+  io.println(string.inspect(open(chest, "wrong")))
+  io.println(string.inspect(open(chest, "long enough")))
+}

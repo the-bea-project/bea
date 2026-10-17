@@ -1,15 +1,21 @@
 {
   "name": "bea-vscode",
   "displayName": "Bea Language Support",
-  "description": "Syntax highlighting and language support for Bea",
-  "version": "0.0.1",
+  "description": "Syntax highlighting, diagnostics, completion, navigation and formatting for Bea",
+  "version": "0.2.0",
   "icon": "./icons/beatrix.png",
   "publisher": "bea-lang",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Formatters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "workspaceContains:**/bea.toml"
   ],
   "contributes": {
     "languages": [
@@ -18,7 +24,6 @@
         "aliases": ["Bea", "bea"],
         "extensions": [".bea"],
         "configuration": "./language-configuration.json",
-
         "icon": {
           "light": "./icons/beatrix.svg",
           "dark": "./icons/beatrix.svg"
@@ -31,6 +36,42 @@
         "scopeName": "source.bea",
         "path": "./syntaxes/bea.tmLanguage.json"
       }
+    ],
+    "configuration": {
+      "title": "Bea",
+      "properties": {
+        "bea.path": {
+          "type": "string",
+          "default": "bea",
+          "description": "Path to the `bea` executable used to run the language server."
+        },
+        "bea.gleamPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `gleam` executable (defaults to `gleam` on the PATH)."
+        },
+        "bea.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the communication between VS Code and the Bea language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "bea.restartServer",
+        "title": "Bea: Restart Language Server"
+      }
     ]
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.1"
   }
 }
