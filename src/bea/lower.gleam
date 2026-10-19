@@ -497,6 +497,25 @@ fn desugar_expr(e: Expr) -> Expr {
         list.map(pairs, fn(kv) { #(d(kv.0), d(kv.1)) }),
       )
     ast.Fn(s, params, ret, stmts) -> anonymous_fn(s, params, ret, stmts)
+    ast.FnClauses(s, clauses) -> {
+      // Create a unique, non-discard variable name
+      let arg_name = "bea_param_" <> int.to_string(s.start)
+      let arg_var = ast.Var(s, arg_name)
+      let param = ast.FnParam(s, ast.PVar(s, arg_name), None)
+
+      // Desugar the inner case clauses recursively so ? and return work
+      let d_clauses =
+        list.map(clauses, fn(c) {
+          ast.CaseClause(
+            ..c,
+            guard: option.map(c.guard, desugar_expr),
+            body: desugar_expr(c.body),
+          )
+        })
+
+      let body = [ast.Expression(ast.Case(s, [arg_var], d_clauses))]
+      ast.Fn(s, [param], None, body)
+    }
     ast.Block(s, stmts) -> ast.Block(s, desugar_stmts(stmts))
     ast.If(s, c, t, el) ->
       ast.If(s, d(c), desugar_stmts(t), option.map(el, desugar_stmts))
@@ -638,7 +657,7 @@ fn children(e: Expr) -> List(Expr) {
     ast.List(_, es, t) -> list.append(es, opt_list(t))
     ast.Map(_, b, pairs) ->
       list.append(opt_list(b), list.flat_map(pairs, fn(kv) { [kv.0, kv.1] }))
-    ast.Fn(..) -> []
+    ast.Fn(..) | ast.FnClauses(..) -> []
     ast.Block(_, stmts) -> list.flat_map(stmts, statement_exprs)
     ast.If(_, c, t, el) -> [
       c,
@@ -882,7 +901,8 @@ fn hoist(e: Expr, block: Tail, expr_tail: Tail) -> #(List(Statement), Expr) {
     | ast.Constructor(..)
     | ast.Hole(..)
     | ast.Fn(..)
-    | ast.Cond(..) -> #([], e)
+    | ast.Cond(..)
+    | ast.FnClauses(..) -> #([], e)
     ast.String(s, parts) -> {
       let exprs =
         list.filter_map(parts, fn(p) {
@@ -1081,7 +1101,8 @@ fn pure(e: Expr) -> Bool {
     | ast.Var(..)
     | ast.Constructor(..)
     | ast.Hole(..)
-    | ast.Fn(..) -> True
+    | ast.Fn(..)
+    | ast.FnClauses(..) -> True
     ast.String(_, parts) ->
       list.all(parts, fn(p) {
         case p {
@@ -1484,6 +1505,7 @@ fn stmt_returns(stmt: Statement) -> List(Diagnostic) {
 fn expr_returns(e: Expr) -> List(Diagnostic) {
   case e {
     ast.Fn(_, _, _, body) -> list.flat_map(body, stmt_returns)
+    ast.FnClauses(..) -> []
     ast.Block(_, stmts) -> list.flat_map(stmts, stmt_returns)
     ast.If(_, c, t, el) ->
       list.flatten([
@@ -1543,6 +1565,7 @@ fn expr_tries(e: Expr) -> List(Diagnostic) {
       list.flat_map(body, fn(s) {
         list.flat_map(statement_exprs(s), expr_tries)
       })
+    ast.FnClauses(..) -> []
     _ -> list.flat_map(children(e), expr_tries)
   }
 }

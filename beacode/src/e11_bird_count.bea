@@ -23,11 +23,11 @@ def has_day_without_birds([]) {
   False
 }
 
-def has_day_without_birds([head | tail]) if head == 0 {
+def has_day_without_birds([head | _tail]) if head == 0 {
   True
 }
 
-def has_day_without_birds([head | tail]) {
+def has_day_without_birds([_head | tail]) {
   has_day_without_birds(tail)
 }
 

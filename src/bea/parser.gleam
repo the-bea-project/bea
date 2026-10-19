@@ -1350,20 +1350,36 @@ fn map_pairs(
 }
 
 fn anonymous_fn(start: Span, ts: Tokens) -> Parsed(Expr) {
-  use #(_, ts) <- result.try(expect(ts, lexer.LParen, "`(` after `fn`"))
-  use #(#(params, _), ts) <- result.try(
-    sequence(ts, lexer.RParen, "`)`", fn_param, []),
-  )
-  use #(return_type, ts) <- result.try(case ts {
-    [Token(lexer.Arrow, _, _), ..rest] -> {
-      use #(t, rest) <- result.try(type_(rest))
-      Ok(#(Some(t), rest))
+  case ts {
+    // 1. Elixir-style multi-clause block!
+    [Token(lexer.LBrace, _, _), ..rest] -> {
+      // We assume arity 1 for implicit pipeline arguments
+      use #(#(clauses, close), rest) <- result.try(case_clauses(rest, 1, []))
+      Ok(#(ast.FnClauses(sp(start, close), clauses), rest))
     }
-    _ -> Ok(#(None, ts))
-  })
-  use #(_, ts) <- result.try(expect(ts, lexer.LBrace, "`{` to start the body"))
-  use #(#(body, close), ts) <- result.try(block_body(ts))
-  Ok(#(ast.Fn(sp(start, close), params, return_type, body), ts))
+
+    // 2. The standard fn(x) { ... } block
+    [Token(lexer.LParen, _, _), ..rest] -> {
+      use #(#(params, _), ts) <- result.try(
+        sequence(rest, lexer.RParen, "`)`", fn_param, []),
+      )
+      use #(return_type, ts) <- result.try(case ts {
+        [Token(lexer.Arrow, _, _), ..rest] -> {
+          use #(t, rest) <- result.try(type_(rest))
+          Ok(#(Some(t), rest))
+        }
+        _ -> Ok(#(None, ts))
+      })
+      use #(_, ts) <- result.try(expect(
+        ts,
+        lexer.LBrace,
+        "`{` to start the body",
+      ))
+      use #(#(body, close), ts) <- result.try(block_body(ts))
+      Ok(#(ast.Fn(sp(start, close), params, return_type, body), ts))
+    }
+    _ -> Error(unexpected(peek(ts), "`(` or `{` after `fn`"))
+  }
 }
 
 fn fn_param(ts: Tokens) -> Parsed(FnParam) {

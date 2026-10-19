@@ -231,6 +231,7 @@ pub type Expr {
     return_type: Option(Type),
     body: List(Statement),
   )
+  FnClauses(span: Span, clauses: List(CaseClause))
   Block(span: Span, statements: List(Statement))
   If(
     span: Span,

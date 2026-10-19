@@ -403,6 +403,12 @@ fn expr_containers(src: BitArray, e: Expr) -> List(Container) {
         ..list.flat_map(body, statement_containers(src, _))
       ]
     }
+    ast.FnClauses(s, clauses) -> [
+      Container(s, Lines, list.map(clauses, fn(c) { c.span })),
+      ..list.flat_map(clauses, fn(c) {
+        sub([c.body, ..option.values([c.guard])])
+      })
+    ]
     ast.Block(s, stmts) -> block_container(src, s, stmts)
     ast.If(s, c, t, el) -> [
       // The condition isn't an anchor: a comment after `if c {` belongs
@@ -1177,6 +1183,24 @@ fn expr(e: Expr, ctx: Ctx) -> Doc {
       }
       doc.concat([t("fn"), params, ret, t(" "), body])
     }
+    ast.FnClauses(s, clauses) ->
+      doc.concat([
+        t("fn {"),
+        doc.nest(
+          doc.concat([
+            doc.hard_line,
+            lines(
+              ctx,
+              s,
+              list.map(clauses, fn(c) { #(c.span, case_clause(c, ctx)) }),
+              fn(_, _) { False },
+            ),
+          ]),
+          2,
+        ),
+        doc.hard_line,
+        t("}"),
+      ])
     ast.Block(s, stmts) -> block(ctx, s, stmts)
     ast.If(s, c, then, el) -> if_doc(ctx, s, c, then, el)
     ast.Cond(s, clauses) ->

@@ -1,0 +1,9 @@
+// // import simplifile
+
+// pub def read_emails(path: String) {
+
+// }
+
+pub def main() {
+  "hello"
+}

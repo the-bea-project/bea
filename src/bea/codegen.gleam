@@ -567,6 +567,23 @@ fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
       let inner = list.fold(params, scope, fn(s, p) { bind(s, p.pattern) })
       u_stmts(u, inner, body)
     }
+    ast.FnClauses(_, clauses) -> {
+      list.fold(clauses, u, fn(u, c) {
+        let inner =
+          list.fold(c.alternatives, scope, fn(s, alt) {
+            list.fold(alt, s, bind)
+          })
+        let u =
+          list.fold(c.alternatives, u, fn(u, alt) {
+            list.fold(alt, u, u_pattern)
+          })
+        let u = case c.guard {
+          Some(g) -> u_expr(u, inner, g)
+          None -> u
+        }
+        u_expr(u, inner, c.body)
+      })
+    }
     ast.Block(_, stmts) -> u_stmts(u, scope, stmts)
     ast.If(_, c, t, el) -> {
       let u = u_stmts(go(u, c), scope, t)
@@ -1137,7 +1154,8 @@ fn expr_inner(e: Expr, plan: Plan) -> Doc {
         doc.concat([t("False ->"), false_branch]),
       ])
     }
-    ast.Cond(..) -> t("todo as \"cond should have been lowered\"")
+    ast.Cond(..) | ast.FnClauses(..) ->
+      t("todo as \"should have been lowered\"")
     ast.Case(_, subjects, clauses) ->
       case_doc(
         list.map(subjects, expr(_, plan)),
