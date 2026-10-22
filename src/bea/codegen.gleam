@@ -74,7 +74,9 @@ type Plan {
   )
 }
 
-const std_modules = [
+/// Standard library modules Bea imports by itself when they are used:
+/// (qualifier, module path).
+pub const std_modules = [
   #("list", "gleam/list"),
   #("dict", "gleam/dict"),
   #("set", "gleam/set"),
@@ -367,11 +369,47 @@ type Usage {
     unqualified: Set(#(Bool, String)),
     helpers: Set(String),
     locals: Set(String),
+    /// `module.member` references: (qualifier, member).
+    members: Set(#(String, String)),
+    /// Lower case names used without being bound locally (module functions
+    /// and constants, unqualified imports).
+    values: Set(String),
+  )
+}
+
+/// What a module refers to by name, for organising its imports.
+pub type References {
+  References(
+    /// Qualifiers used as modules: `list` in `list.map`, types, patterns.
+    modules: Set(String),
+    /// (qualifier, member) pairs: `#("list", "map")`, `#("request", "Request")`.
+    members: Set(#(String, String)),
+    /// Unqualified types (`#(True, "Dict")`) and constructors
+    /// (`#(False, "Some")`).
+    unqualified: Set(#(Bool, String)),
+    /// Lower case names that aren't local variables.
+    values: Set(String),
+  )
+}
+
+/// The names a (not yet lowered) module refers to, scope aware: a variable
+/// called `list` is not the `list` module.
+pub fn references(module: ast.Module) -> References {
+  let u = collect(module)
+  References(u.modules, u.members, u.unqualified, u.values)
+}
+
+fn add_member(u: Usage, m: String, name: String) -> Usage {
+  Usage(
+    ..u,
+    modules: set.insert(u.modules, m),
+    members: set.insert(u.members, #(m, name)),
   )
 }
 
 fn collect(module: ast.Module) -> Usage {
-  let u = Usage(set.new(), set.new(), set.new(), set.new())
+  let u =
+    Usage(set.new(), set.new(), set.new(), set.new(), set.new(), set.new())
   list.fold(module.items, u, fn(u, it) {
     case it {
       ast.Function(clauses:, ..) ->
@@ -439,8 +477,8 @@ fn u_pattern(u: Usage, p: Pattern) -> Usage {
           None -> u
         }
       })
-    ast.PConstructor(module: Some(m), args:, ..) ->
-      list.fold(args, Usage(..u, modules: set.insert(u.modules, m)), fn(u, a) {
+    ast.PConstructor(module: Some(m), name:, args:, ..) ->
+      list.fold(args, add_member(u, m, name), fn(u, a) {
         case a.value {
           Some(v) -> u_pattern(u, v)
           None -> u
@@ -479,8 +517,8 @@ fn u_type(u: Usage, t: Type) -> Usage {
   case t {
     ast.NamedType(_, None, name, args) ->
       list.fold(args, add_unq(u, True, name), u_type)
-    ast.NamedType(_, Some(m), _, args) ->
-      list.fold(args, Usage(..u, modules: set.insert(u.modules, m)), u_type)
+    ast.NamedType(_, Some(m), name, args) ->
+      list.fold(args, add_member(u, m, name), u_type)
     ast.TupleType(_, ts) -> list.fold(ts, u, u_type)
     ast.FnType(_, ps, r) -> u_type(list.fold(ps, u, u_type), r)
     _ -> u
@@ -515,6 +553,19 @@ fn u_stmts(u: Usage, scope: Set(String), stmts: List(Statement)) -> Usage {
           }
           u_stmts(u, scope, rest)
         }
+        ast.Guard(_, p, t, v, otherwise) -> {
+          let u = u_expr(u, scope, v) |> u_type_opt(t)
+          let #(u, else_scope) = case otherwise.binding {
+            Some(b) -> #(u_pattern(u, b), bind(scope, b))
+            None -> #(u, scope)
+          }
+          let u = u_stmts(u, else_scope, otherwise.body)
+          let #(u, scope) = case p {
+            Some(p) -> #(u_pattern(u, p), bind(scope, p))
+            None -> #(u, scope)
+          }
+          u_stmts(u, scope, rest)
+        }
       }
   }
 }
@@ -523,17 +574,17 @@ fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
   let go = fn(u, x) { u_expr(u, scope, x) }
   case e {
     ast.Var(_, n) ->
-      case string.starts_with(n, "$") {
-        True -> Usage(..u, helpers: set.insert(u.helpers, n))
-        False -> u
+      case string.starts_with(n, "$"), set.contains(scope, n) {
+        True, _ -> Usage(..u, helpers: set.insert(u.helpers, n))
+        False, False -> Usage(..u, values: set.insert(u.values, n))
+        False, True -> u
       }
     ast.Constructor(_, None, n) -> add_unq(u, False, n)
-    ast.Constructor(_, Some(m), _) ->
-      Usage(..u, modules: set.insert(u.modules, m))
-    ast.FieldAccess(_, ast.Var(_, m), _, _) ->
+    ast.Constructor(_, Some(m), n) -> add_member(u, m, n)
+    ast.FieldAccess(_, ast.Var(_, m), field, _) ->
       case set.contains(scope, m) {
         True -> u
-        False -> Usage(..u, modules: set.insert(u.modules, m))
+        False -> add_member(u, m, field)
       }
     ast.Int(..) | ast.Float(..) | ast.RawString(..) | ast.Hole(..) -> u
     ast.String(_, parts) ->
@@ -544,9 +595,11 @@ fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
         }
       })
     ast.FieldAccess(_, b, _, _) | ast.TupleIndex(_, b, _) -> go(u, b)
-    ast.Call(_, f, args) -> list.fold(arg_values(args), go(u, f), go)
+    ast.Call(_, f, args) ->
+      list.fold(arg_values(args), go(u, f), go) |> u_shorthand(scope, args)
     ast.RecordUpdate(_, c, b, args) ->
       list.fold(arg_values(args), go(go(u, c), b), go)
+      |> u_shorthand(scope, args)
     ast.Tuple(_, es) -> list.fold(es, u, go)
     ast.List(_, es, t) -> list.fold(list.append(es, option.values([t])), u, go)
     ast.Map(_, b, pairs) -> {
@@ -631,6 +684,20 @@ fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
 
 fn arg_values(args: List(ast.Arg)) -> List(Expr) {
   option.values(list.map(args, fn(a) { a.value }))
+}
+
+/// `f(label:)` passes the variable `label`.
+fn u_shorthand(u: Usage, scope: Set(String), args: List(ast.Arg)) -> Usage {
+  list.fold(args, u, fn(u, a) {
+    case a.label, a.value {
+      Some(l), None ->
+        case set.contains(scope, l) {
+          True -> u
+          False -> Usage(..u, values: set.insert(u.values, l))
+        }
+      _, _ -> u
+    }
+  })
 }
 
 // --- Printing -----------------------------------------------------------------------
@@ -1004,6 +1071,9 @@ fn statement(stmt: Statement, plan: Plan) -> Doc {
         },
       ])
       |> mk(s)
+    // Guards are lowered to `case`s; only reachable when lowering failed
+    // and reported an error.
+    ast.Guard(s, _, _, value, _) -> expr(value, plan) |> mk(s)
   }
 }
 

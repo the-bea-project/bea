@@ -61,6 +61,11 @@
           "type": "boolean",
           "default": true,
           "description": "Complete functions with `()` and show their signature, with the cursor between the parentheses."
+        },
+        "bea.format.organizeImports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Organise imports when formatting: standard library, dependencies and project modules in sorted groups, unused imports removed, obvious missing ones added."
         }
       }
     },

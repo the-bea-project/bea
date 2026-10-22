@@ -9,8 +9,13 @@ import bea/compiler
 import bea/diagnostic
 import bea/formatter
 import bea/gleam_output
+import bea/highlight
+import bea/imports
+import bea/lsp/index
 import bea/lsp/server as lsp
 import bea/project.{type Project}
+import bea/shell
+import bea/style
 import bea/system
 import gleam/dict
 import gleam/int
@@ -30,7 +35,10 @@ pub fn main(args: List(String)) -> Int {
       0
     }
     ["--version"] | ["-V"] | ["version"] -> {
-      io.println("bea " <> version)
+      io.println(case colour() {
+        True -> style.accent("bea") <> " " <> version
+        False -> "bea " <> version
+      })
       0
     }
     ["new", ..rest] -> new(rest)
@@ -47,6 +55,7 @@ pub fn main(args: List(String)) -> Int {
     ["export", ..rest] -> passthrough(["export", ..rest], True)
     ["publish", ..rest] -> publish(rest)
     ["hex", ..rest] -> passthrough(["hex", ..rest], False)
+    ["shell", ..] | ["repl", ..] -> shell_command()
     ["lsp", ..] -> lsp.main()
     [command, ..] -> {
       error("Unknown command `" <> command <> "`")
@@ -57,36 +66,96 @@ pub fn main(args: List(String)) -> Int {
 }
 
 fn help() -> String {
-  "bea " <> version <> " — a friendlier syntax for Gleam
-
-Usage: bea <COMMAND> [OPTIONS]
-
-Project commands:
-  new <NAME>           Create a new Bea project
-  add <PACKAGE>...     Add dependencies (--dev for dev dependencies)
-  remove <PACKAGE>...  Remove dependencies
-  update [PACKAGE]...  Update dependencies to their latest compatible versions
-  deps <COMMAND>       Work with dependency packages (list, download, tree)
-  clean                Delete the generated .beabuild directory
-
-Building:
-  check                Type check the project
-  build                Build the project
-  run [FILE | -m MOD]  Run a module's `main` function (default: the project's)
-  export <WHAT>        Export an escript, Erlang shipment, hex tarball, ...
-
-Code:
-  format [PATHS]...    Format Bea source files (--check, --stdin)
-  transpile [FILE]     Print the Gleam code generated for a file (or
-                       --stdin; --out DIR writes the whole project)
-  lsp                  Run the language server, to be used by editors
-
-Publishing:
-  publish              Publish the package to Hex (as a Gleam package)
-  hex <COMMAND>        Hex account commands (authenticate, retire, ...)
-
-Options such as --target are passed through to Gleam.
-Run outside a project, `bea run file.bea` treats the file's folder as src/."
+  let c = colour()
+  let paint = fn(f: fn(String) -> String, text: String) {
+    case c {
+      True -> f(text)
+      False -> text
+    }
+  }
+  let heading = fn(text) { paint(style.accent, text) }
+  let command = fn(name: String, args: String, description: String) {
+    let width = string.length(name) + 1 + string.length(args)
+    "  "
+    <> paint(style.highlight, name)
+    <> " "
+    <> paint(style.dim, args)
+    <> string.repeat(" ", int.max(21 - width, 1))
+    <> description
+  }
+  [
+    paint(style.accent, "bea")
+      <> " "
+      <> paint(style.dim, version)
+      <> " — a language that transpiles to Gleam",
+    "",
+    heading("Usage:") <> " bea <COMMAND> [OPTIONS]",
+    "",
+    heading("Project"),
+    command("new", "<NAME>", "Create a new Bea project"),
+    command(
+      "add",
+      "<PACKAGE>...",
+      "Add dependencies (--dev for dev dependencies)",
+    ),
+    command("remove", "<PACKAGE>...", "Remove dependencies"),
+    command(
+      "update",
+      "[PACKAGE]...",
+      "Update dependencies to their latest compatible versions",
+    ),
+    command(
+      "deps",
+      "<COMMAND>",
+      "Work with dependency packages (list, download, tree)",
+    ),
+    command("clean", "", "Delete the generated .beabuild directory"),
+    "",
+    heading("Building"),
+    command("check", "", "Type check the project"),
+    command("build", "", "Build the project"),
+    command(
+      "run",
+      "[FILE | -m MOD]",
+      "Run a module's `main` function (default: the project's)",
+    ),
+    command("shell", "", "Start an interactive Bea shell (REPL) in the project"),
+    command(
+      "export",
+      "<WHAT>",
+      "Export an escript, Erlang shipment, hex tarball, ...",
+    ),
+    "",
+    heading("Code"),
+    command(
+      "format",
+      "[PATHS]...",
+      "Format Bea source files (--check, --stdin, --imports",
+    ),
+    "                       to also organise imports)",
+    command(
+      "transpile",
+      "[FILE]",
+      "Print the Gleam code generated for a file (or",
+    ),
+    "                       --stdin; --out DIR writes the whole project)",
+    command("lsp", "", "Run the language server, to be used by editors"),
+    "",
+    heading("Publishing"),
+    command("publish", "", "Publish the package to Hex (as a Gleam package)"),
+    command(
+      "hex",
+      "<COMMAND>",
+      "Hex account commands (authenticate, retire, ...)",
+    ),
+    "",
+    paint(style.dim, "Options such as --target are passed through to Gleam."),
+    paint(
+      style.dim,
+      "Run outside a project, `bea run file.bea` treats the file's folder as src/.",
+    ),
+  ]
+  |> string.join("\n")
 }
 
 // --- Output helpers -------------------------------------------------------------
@@ -96,35 +165,41 @@ fn colour() -> Bool {
 }
 
 fn error(message: String) -> Nil {
-  let prefix = case colour() {
-    True -> "\u{001b}[1m\u{001b}[31merror\u{001b}[0m\u{001b}[1m: "
-    False -> "error: "
+  let text = case colour() {
+    True -> style.error("error") <> style.bold(": " <> message)
+    False -> "error: " <> message
   }
-  let suffix = case colour() {
-    True -> "\u{001b}[0m"
-    False -> ""
-  }
-  system.print_stderr(prefix <> message <> suffix <> "\n")
+  system.print_stderr(text <> "\n")
 }
 
+/// `   Compiled in 0.3s`: a right aligned purple verb, like Gleam's.
 fn status(verb: String, rest: String) -> Nil {
   let verb = string.pad_start(verb, 11, " ")
   let verb = case colour() {
-    True -> "\u{001b}[1m\u{001b}[35m" <> verb <> "\u{001b}[0m"
+    True -> style.accent(verb)
     False -> verb
   }
   system.print_stderr(verb <> " " <> rest <> "\n")
 }
 
+fn render_diagnostics(
+  diagnostics: List(diagnostic.Diagnostic),
+  path: String,
+  source: String,
+) -> String {
+  diagnostic.render_all_highlighted(
+    diagnostics,
+    path,
+    source,
+    colour(),
+    highlight.bea,
+  )
+}
+
 fn print_file_diagnostics(files: List(project.FileErrors)) -> Nil {
   list.each(files, fn(f) {
     system.print_stderr(
-      diagnostic.render_all(
-        f.diagnostics,
-        project.display_path(f.path),
-        f.source,
-        colour(),
-      )
+      render_diagnostics(f.diagnostics, project.display_path(f.path), f.source)
       <> "\n",
     )
   })
@@ -267,14 +342,29 @@ fn new(args: List(String)) -> Int {
                 let _ = simplifile.write(full, f.1)
                 Nil
               })
+              let c = colour()
+              let em = fn(text) {
+                case c {
+                  True -> style.accent(text)
+                  False -> text
+                }
+              }
+              let cmd = fn(text) {
+                case c {
+                  True -> style.highlight(text)
+                  False -> text
+                }
+              }
               io.println(
-                "Your Bea project " <> name <> " has been successfully created.",
+                "Your Bea project "
+                <> em(name)
+                <> " has been successfully created.",
               )
               io.println(
                 "The project can be compiled and run with these commands:\n",
               )
-              io.println("    cd " <> path)
-              io.println("    bea run\n")
+              io.println("    " <> cmd("cd " <> path))
+              io.println("    " <> cmd("bea run") <> "\n")
               0
             }
           }
@@ -615,11 +705,34 @@ fn default_module(p: Project) -> Option(String) {
 fn format(args: List(String)) -> Int {
   let check = list.contains(args, "--check")
   let stdin = list.contains(args, "--stdin")
+  let organize = list.contains(args, "--imports")
   let paths = list.filter(args, fn(a) { !string.starts_with(a, "--") })
+  // `--imports` organises imports first, like the language server does when
+  // formatting: grouped, sorted, unused ones removed, obvious ones added.
+  let prepare = fn(path: String, source: String) {
+    case organize {
+      False -> source
+      True ->
+        case project.find(project.dirname(system.absolute_path(path))) {
+          Error(_) -> imports.organize(source, imports.nothing_known())
+          Ok(p) -> {
+            let deps = case project.has_deps(p) {
+              True -> Some(index.dependencies(p))
+              False -> None
+            }
+            let known =
+              imports.for_project(p, deps, system.absolute_path(path), fn(_) {
+                Error(Nil)
+              })
+            imports.organize(source, known)
+          }
+        }
+    }
+  }
   case stdin {
     True -> {
       let source = system.read_stdin()
-      case formatter.format(source) {
+      case formatter.format(prepare(system.cwd() <> "/stdin.bea", source)) {
         Ok(formatted) -> {
           system.print(formatted)
           case check && formatted != source {
@@ -628,12 +741,7 @@ fn format(args: List(String)) -> Int {
           }
         }
         Error(diags) -> {
-          system.print_stderr(diagnostic.render_all(
-            diags,
-            "<stdin>",
-            source,
-            colour(),
-          ))
+          system.print_stderr(render_diagnostics(diags, "<stdin>", source))
           1
         }
       }
@@ -664,13 +772,12 @@ fn format(args: List(String)) -> Int {
               #(file, False, True)
             }
             Ok(source) ->
-              case formatter.format(source) {
+              case formatter.format(prepare(file, source)) {
                 Error(diags) -> {
-                  system.print_stderr(diagnostic.render_all(
+                  system.print_stderr(render_diagnostics(
                     diags,
                     project.display_path(file),
                     source,
-                    colour(),
                   ))
                   #(file, False, True)
                 }
@@ -757,14 +864,64 @@ fn transpile(args: List(String)) -> Int {
 fn transpile_source(source: String, name: String) -> Int {
   case compiler.compile(source, codegen.empty_context()) {
     Ok(c) -> {
-      io.print(c.gleam)
+      // Highlighted on a terminal; plain when piped (editors read it).
+      io.print(case colour() {
+        True -> highlight.gleam(c.gleam)
+        False -> c.gleam
+      })
       0
     }
     Error(diags) -> {
-      system.print_stderr(diagnostic.render_all(diags, name, source, colour()))
+      system.print_stderr(render_diagnostics(diags, name, source))
       1
     }
   }
+}
+
+/// `bea shell`: the project's shell, or (outside a project) one in a
+/// scratch project kept in the user's cache directory.
+fn shell_command() -> Int {
+  let resolved = case project.find(system.cwd()) {
+    Ok(p) -> Ok(p)
+    Error(_) -> scratch_project()
+  }
+  use p <- or_exit(resolved)
+  use exe <- or_exit(gleam())
+  // GSH evaluates on the Erlang target, whatever the project's default.
+  let build = fn() {
+    case sync(p) {
+      Error(_) -> False
+      Ok(s) -> run_gleam(p, s, ["build", "--target", "erlang"]) == 0
+    }
+  }
+  case build() {
+    False -> 1
+    True -> shell.start(p, exe, build)
+  }
+}
+
+fn scratch_project() -> Result(Project, Nil) {
+  let cache = case system.get_env("XDG_CACHE_HOME"), system.get_env("HOME") {
+    Ok(dir), _ -> dir
+    _, Ok(home) -> home <> "/.cache"
+    _, _ -> "/tmp"
+  }
+  let dir = cache <> "/bea/shell"
+  let _ = simplifile.create_directory_all(dir <> "/src")
+  let config = dir <> "/" <> project.config_file
+  case simplifile.is_file(config) {
+    Ok(True) -> Nil
+    _ -> {
+      let _ = simplifile.write(config, project.default_config("bea_shell"))
+      let _ =
+        simplifile.write(
+          dir <> "/src/bea_shell.bea",
+          "// Scratch project of `bea shell` outside a project.\npub def main() {\n  Nil\n}\n",
+        )
+      Nil
+    }
+  }
+  project.find(dir)
 }
 
 /// Bea packages are published to Hex as the Gleam code they compile to, so

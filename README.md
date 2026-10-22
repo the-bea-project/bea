@@ -1,12 +1,10 @@
 # Bea
 
-Bea is a friendlier syntax for [Gleam](https://gleam.run). It compiles to plain,
-readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and
-JavaScript), the whole Hex ecosystem and Gleam's language server for free —
-while borrowing ergonomics from Elixir:
+Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It compiles to plain, readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and JavaScript), the whole Hex ecosystem and Gleam's language server for free — while borrowing ergonomics from Elixir:
 
 - multi-clause functions with pattern matching and guards
-- early `return`, and `?` for error propagation
+- early `return`, `?` for error propagation, and `else` guards
+  (`Ok(user) = auth(req) else unauthorized()`)
 - `if`/`else`, `cond` and `case` as expressions
 - string interpolation: `"Hello, #{name}!"`
 - `(a, b)` tuples, `%{"k": v}` maps, `[head | tail]` lists
@@ -83,7 +81,8 @@ my_app/
 | `bea check` | Type check |
 | `bea build` | Build (`--target javascript`, `--warnings-as-errors`, ...) |
 | `bea run [FILE.bea \| -m MODULE] [-- ARGS]` | Run a module's `main` |
-| `bea format [--check] [--stdin] [PATHS]` | Format `.bea` files |
+| `bea format [--check] [--stdin] [--imports] [PATHS]` | Format `.bea` files (`--imports` also organises imports) |
+| `bea shell` | Interactive Bea shell (REPL) in the project, built on GSH |
 | `bea transpile FILE.bea` | Print the Gleam generated for a file (`--stdin` reads the source from stdin) |
 | `bea transpile --out DIR` | Write the project out as a plain Gleam project ("eject") |
 | `bea export erlang-shipment\|escript\|...` | Gleam's export commands |
@@ -107,6 +106,11 @@ The <> operator expects arguments of this type:
 ```
 
 `echo` output and runtime stack traces are rewritten the same way.
+
+Output is coloured in one purple accent on dark greys (red and yellow only
+for errors and warnings), and code is syntax highlighted: the Bea lines in
+error snippets, and the Gleam printed by `bea transpile` on a terminal.
+`NO_COLOR` turns colours off, `FORCE_COLOR` forces them.
 
 Outside a project, `bea run some/dir/file.bea` treats `some/dir` as the
 source directory, which is handy for scripts and exercises.
@@ -166,6 +170,33 @@ pub def user_decoder() -> decode.Decoder(User) {
   decode.success(User(name:, age:))
 }
 ```
+
+### The shell
+
+`bea shell` starts an interactive shell in the project (or, outside a
+project, in a scratch project in `~/.cache/bea/shell`):
+
+```text
+bea> import beahive/services/cache
+bea> c = cache.setup_rate_cache()
+bea> def double(n) { n * 2 }
+bea> [1, 2, 3] |> list.map(double)
+[2, 4, 6] : List(Int)
+```
+
+You type Bea; each input is compiled by Bea and evaluated by
+[GSH](https://gsh.hexdocs.pm), the Gleam shell, which Bea depends on.
+Bindings, imports, `def`s and `type`s carry over to later inputs, and the
+side effects of earlier inputs don't run again. The line is highlighted as
+you type (on OTP 28+; OTP 27 reads plain lines), input continues on the
+next line while brackets are open, and history is kept across sessions. `:help` lists the commands: `:gleam` shows
+the Gleam each input compiles to, `:cc` rebuilds the project and reloads
+what changed, `:b` lists the bindings.
+
+`?`, `return` and `else` guards leave a function, so in the shell they go
+inside a `def`. The shell runs on the Erlang target, and project modules
+can't have the same name as a module the shell uses itself (it warns, e.g.
+for an `ffi.erl`: name it `<package>_ffi.erl`).
 
 ### Publishing
 
@@ -306,6 +337,69 @@ def parse_port(text: String) -> Result(Int, Nil) {
 ok = strict and parse(s)? > 0
 ```
 
+### Guards: `else`
+
+A guard is an assignment that must match, with what to return when it
+doesn't. It's `?` for any pattern, with any exit value, and it keeps the
+code flat:
+
+```bea
+def first_even(xs: List(Int)) -> Result(Int, String) {
+  [first, ..] = list.filter(xs, int.is_even) else Error("no even number")
+  Ok(first)
+}
+```
+
+When the value doesn't match the pattern, the function returns what
+follows `else`, and the rest of the block never runs. Like `?` and
+`return`, a guard leaves the function from anywhere (only an anonymous
+function's own guards stop at that function).
+
+- **Boolean guards** drop the pattern: `allowed(ip) else too_many()`.
+- **With `?`**, the pattern matches the `Ok` value and the `else` can bind
+  the error: `user = auth(req)? else reason -> unauthorized(reason)`.
+- **Any pattern** can bind what didn't match: `Some(v) = lookup(k) else
+  None -> default`.
+- The fallback can be a block (`else { log("..."); fallback }`), an
+  explicit `else return x`, and can go on the next line when it is long.
+
+Guards compile to plain `case` expressions: the rest of the block becomes
+the matching branch.
+
+#### Middleware
+
+Middleware that only decides whether the request goes on is a guard; the
+check reads top to bottom, without callbacks:
+
+```bea
+pub def handle_request(req: Request(Connection), ctx: Context) -> Response(Body) {
+  use <- log_request(req)
+  !rate_limiters.blocked(client_ip(req), ctx) else too_many_requests()
+  user = auth.current_user(req, ctx)? else reason -> unauthorized(reason)
+
+  case req.method, request.path_segments(req) {
+    http.Get, [] -> handle_root(ctx, user)
+    _, _ -> not_found()
+  }
+}
+```
+
+Middleware that does something *after* the handler (logging the
+response, timing, adding headers, rescuing errors) wraps the rest of the
+function, which is what `use` is for: `log_request` above is an ordinary
+function taking `next`:
+
+```bea
+pub def log_request(req: Request(a), next: fn() -> Response(b)) -> Response(b) {
+  response = next()
+  io.println(req.path <> " -> " <> int.to_string(response.status))
+  response
+}
+```
+
+So: `use` for middleware *around* the handler, guards for middleware
+*before* it, and `?` when the check already returns a `Result`.
+
 ### Data
 
 ```bea
@@ -418,8 +512,8 @@ evaluated when the assertion fails.
   holding the `return` rather than on the line Gleam finds inconsistent,
   because Gleam sees the rest of the function as the guard's continuation.
 - Doc comments on individual record fields aren't passed on to Gleam.
-- `bea test`, `bea docs` and `bea shell` aren't implemented; run the Gleam
-  equivalents inside `.beabuild/` if you need them.
+- `bea test` and `bea docs` aren't implemented; run the Gleam equivalents
+  inside `.beabuild/` if you need them.
 
 ## Editor support
 
@@ -445,7 +539,18 @@ IDE features on `.bea` files:
 - `@external` interop: go to definition and hover on an `@external(...)`
   open the Erlang / JavaScript function it binds (`.erl` / `.mjs` in `src/` or
   in a dependency)
-- document symbols, and formatting (Bea's own formatter)
+- completion of locals and functions everywhere in a function: `case`,
+  `cond` and `if` branches, after `?` and early returns, in `use` callbacks
+  (Bea turns these into Gleam code of another shape; positions are mapped
+  onto the right Gleam token)
+- document symbols, and formatting (Bea's own formatter), which also
+  **organises imports**, like `goimports`: the standard library
+  (`gleam/...`), other dependencies and the project's own modules in sorted
+  groups separated by a blank line; unused imports and unqualified names
+  removed; and missing imports added when there is no doubt (`process.sleep`
+  is used, only `gleam/erlang/process` has a `sleep`). When two modules could
+  be meant, nothing is added. Turn it off with `bea.format.organizeImports`
+  in VS Code (initialization option `format.organizeImports`).
 
 **VS Code**: see `editors/vscode` (`npm install && npx vsce package`). It
 also has **Bea: Show Generated Gleam** to see what the current buffer compiles
@@ -499,14 +604,17 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/lexer` | Byte-based lexer with exact spans; keeps comments; string interpolation |
 | `bea/parser` | Recursive descent + precedence climbing (Gleam's table); error recovery per definition |
 | `bea/ast` | Syntax tree, every node has a span |
-| `bea/lower` | `cond` → `if`, `?` hoisting (tail-aware), early returns → guards/continuations, multi-clause → `case` |
+| `bea/lower` | `cond` → `if`, `else` guards → `case`, `?` hoisting (tail-aware), early returns → guards/continuations, multi-clause → `case` |
 | `bea/codegen` | Gleam printer, scope-aware import planning, `let` vs `let assert` |
 | `bea/doc` | Wadler-style pretty printer that records source mappings |
 | `bea/sourcemap` | Bea ↔ Gleam position translation |
 | `bea/formatter` | Bea formatter with comment anchoring and a parse-back safety check |
+| `bea/imports` | Organising imports: grouping, sorting, removing unused ones, adding obvious ones |
 | `bea/project` | Project discovery, `.beabuild` sync, manifest handling, compile cache |
 | `bea/gleam_output` | Rewrites Gleam CLI output to Bea locations |
 | `bea/cli` | The `bea` command |
+| `bea/style`, `bea/highlight` | The CLI's colours, and syntax highlighting of Bea and Gleam |
+| `bea/shell`, `bea/line_editor` | `bea shell`: Bea front end for GSH's evaluator, and its line editor |
 | `bea/lsp/*` | JSON, JSON-RPC transport, the proxying language server |
 | `bea/lsp/repair` | Makes the buffer being typed compile (placeholder, closing brackets), finds the call around the cursor |
 | `bea/lsp/index` | Public API of the project and its dependencies (parameter names, docs, unimported values), FFI lookup |

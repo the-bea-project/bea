@@ -6,6 +6,7 @@ import bea/span.{type LineIndex, type Span, Span}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 
 pub type SourceMap {
   SourceMap(
@@ -160,13 +161,61 @@ pub fn bea_line_for_gleam_line(map: SourceMap, line: Int) -> Option(Int) {
 
 /// Like `to_gleam_offset`, but an offset just after the end of a node (where
 /// an editor cursor sits after typing a name) also maps.
+///
+/// A node that ends at the cursor wins over a bigger node around it: inside
+/// `if c { return la| }` the cursor is also "inside" the `if` (lowered to a
+/// `bool.guard(...)` of a different length), and mapping the offset linearly
+/// through that would land on the wrong Gleam token.
 pub fn to_gleam_offset_inclusive(map: SourceMap, offset: Int) -> Option(Int) {
-  case to_gleam_offset(map, offset) {
-    Some(o) -> Some(o)
-    None ->
-      map.mappings
-      |> list.filter(fn(m) { offset == m.source.end && offset > m.source.start })
-      |> smallest(src_len)
-      |> option.map(fn(m) { m.generated.end })
+  inclusive(map, offset, False)
+}
+
+/// For completion: when one node ends at the cursor and another starts there
+/// (`la|.x`), the one being typed (before the cursor) wins.
+pub fn to_gleam_offset_after(map: SourceMap, offset: Int) -> Option(Int) {
+  inclusive(map, offset, True)
+}
+
+fn inclusive(map: SourceMap, offset: Int, prefer_before: Bool) -> Option(Int) {
+  let containing =
+    map.mappings
+    |> list.filter(fn(m) { offset >= m.source.start && offset < m.source.end })
+    |> innermost
+  let ending =
+    map.mappings
+    |> list.filter(fn(m) { offset == m.source.end && offset > m.source.start })
+    |> innermost
+  let linear = fn(m: Mapping) {
+    m.generated.start + int.clamp(offset - m.source.start, 0, gen_len(m))
   }
+  case containing, ending {
+    None, None -> None
+    Some(c), None -> Some(linear(c))
+    None, Some(e) -> Some(e.generated.end)
+    Some(c), Some(e) ->
+      // `e` nested in `c`: the cursor is right after `e`, in `c`'s gap text.
+      case c.source.start <= e.source.start || prefer_before {
+        True -> Some(e.generated.end)
+        False -> Some(linear(c))
+      }
+  }
+}
+
+/// The smallest mapping (by source length, then generated length).
+fn innermost(candidates: List(Mapping)) -> Option(Mapping) {
+  list.fold(candidates, None, fn(best, m) {
+    case best {
+      None -> Some(m)
+      Some(b) ->
+        case int.compare(src_len(m), src_len(b)) {
+          order.Lt -> Some(m)
+          order.Eq ->
+            case gen_len(m) < gen_len(b) {
+              True -> Some(m)
+              False -> best
+            }
+          order.Gt -> best
+        }
+    }
+  })
 }

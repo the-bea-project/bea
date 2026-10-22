@@ -9,9 +9,11 @@
 //// It's a line-by-line state machine so output can be streamed while Gleam
 //// is still running.
 
+import bea/highlight
 import bea/project.{type Module}
 import bea/sourcemap
 import bea/span.{Span}
+import bea/style
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -49,6 +51,14 @@ pub fn new(
 
 /// Feed one line of output; returns the lines to print now.
 pub fn feed(r: Rewriter, line: String) -> #(Rewriter, List(String)) {
+  // Gleam colours its output when FORCE_COLOR is set: recognise it without
+  // the colours (Bea paints it again). Lines that aren't Gleam's own, like a
+  // program's stderr, keep theirs.
+  let plain = strip_ansi(line)
+  let line = case plain != line && is_gleam_line(plain) {
+    True -> plain
+    False -> line
+  }
   case r.snippet {
     Some(snippet) ->
       case is_snippet_line(line) {
@@ -79,6 +89,29 @@ pub fn feed(r: Rewriter, line: String) -> #(Rewriter, List(String)) {
   }
 }
 
+fn strip_ansi(line: String) -> String {
+  case string.contains(line, "\u{001b}[") {
+    False -> line
+    True -> {
+      let assert Ok(re) = regexp.from_string("\u{001b}\\[[0-9;]*m")
+      regexp.replace(re, line, "")
+    }
+  }
+}
+
+fn is_gleam_line(plain: String) -> Bool {
+  let trimmed = string.trim_start(plain)
+  string.starts_with(plain, "error: ")
+  || string.starts_with(plain, "warning: ")
+  || string.starts_with(plain, "Hint: ")
+  || string.starts_with(trimmed, "┌─ ")
+  || is_snippet_line(plain)
+  || case string.split_once(trimmed, " ") {
+    Ok(#(verb, _)) -> list.contains(status_verbs, verb)
+    Error(_) -> False
+  }
+}
+
 /// Flush anything still buffered.
 pub fn finish(r: Rewriter) -> List(String) {
   case r.snippet {
@@ -92,18 +125,36 @@ fn paint(r: Rewriter, line: String) -> String {
     False -> line
     True ->
       case line {
-        "error: " <> rest ->
-          "\u{001b}[1m\u{001b}[31merror\u{001b}[0m\u{001b}[1m: "
-          <> rest
-          <> "\u{001b}[0m"
+        "error: " <> rest -> style.error("error") <> style.bold(": " <> rest)
         "warning: " <> rest ->
-          "\u{001b}[1m\u{001b}[33mwarning\u{001b}[0m\u{001b}[1m: "
-          <> rest
-          <> "\u{001b}[0m"
-        _ -> line
+          style.warning("warning") <> style.bold(": " <> rest)
+        "Hint: " <> rest -> style.bold("Hint:") <> " " <> rest
+        _ -> status_line(line)
       }
   }
 }
+
+/// Gleam's progress lines (`  Compiling gleam_stdlib`) in Bea's purple.
+fn status_line(line: String) -> String {
+  let trimmed = string.trim_start(line)
+  let indent = string.drop_end(line, string.length(trimmed))
+  case string.split_once(trimmed, " ") {
+    Ok(#(verb, rest)) ->
+      case list.contains(status_verbs, verb) {
+        True -> indent <> style.accent(verb) <> " " <> rest
+        False -> line
+      }
+    Error(_) -> line
+  }
+}
+
+const status_verbs = [
+  "Compiling", "Compiled", "Checking", "Checked", "Downloading", "Downloaded",
+  "Resolving", "Added", "Removed", "Updated", "Unchanged", "Running",
+  "Generated", "Generating", "Exported", "Exporting", "Building", "Built",
+  "Publishing", "Published", "Retired", "Unretired", "Cleaned", "Removing",
+  "Formatting", "Creating", "Created", "Fetching", "Linking", "Analyzing",
+]
 
 fn is_snippet_line(line: String) -> Bool {
   let trimmed = string.trim_start(line)
@@ -228,7 +279,7 @@ fn render_snippet(r: Rewriter, snippet: Snippet) -> List(String) {
       Span(0, int.min(start.column, string.byte_size(text))),
     ))
   let multiline = list.any(lines, fn(l) { string.contains(l, "╭") })
-  let highlight = case end.line == start.line && !multiline {
+  let highlighted = case end.line == start.line && !multiline {
     True -> int.max(string.length(span.text(module.source, bea_span)), 1)
     False -> int.max(string.length(text) - column_chars, 1)
   }
@@ -240,16 +291,20 @@ fn render_snippet(r: Rewriter, snippet: Snippet) -> List(String) {
     <> number
     <> ":"
     <> int.to_string(column_chars + 1)
-  let caret = string.repeat("^", highlight)
-  let caret = case r.colour {
-    True -> "\u{001b}[31m" <> caret <> " " <> label <> "\u{001b}[0m"
-    False -> string.trim_end(caret <> " " <> label)
+  let caret = string.repeat("^", highlighted)
+  let #(caret, dim, code) = case r.colour {
+    True -> #(
+      "\u{001b}[31m" <> caret <> " " <> label <> "\u{001b}[0m",
+      style.dim,
+      highlight.bea,
+    )
+    False -> #(string.trim_end(caret <> " " <> label), fn(s) { s }, fn(s) { s })
   }
   [
-    gutter <> " ┌─ " <> location,
-    gutter <> " │",
-    number <> " │ " <> text,
-    gutter <> " │ " <> string.repeat(" ", column_chars) <> caret,
+    dim(gutter <> " ┌─ ") <> location,
+    dim(gutter <> " │"),
+    dim(number <> " │ ") <> code(text),
+    dim(gutter <> " │ ") <> string.repeat(" ", column_chars) <> caret,
   ]
 }
 

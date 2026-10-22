@@ -1,6 +1,7 @@
 //// Compiler diagnostics and their terminal rendering.
 
 import bea/span.{type Span}
+import bea/style
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -45,6 +46,18 @@ pub fn render(
   source: String,
   colour: Bool,
 ) -> String {
+  render_highlighted(diagnostic, path, source, colour, fn(line) { line })
+}
+
+/// Like `render`, colouring the source line with `highlight` (see
+/// `bea/highlight`, which can't be used from here).
+pub fn render_highlighted(
+  diagnostic: Diagnostic,
+  path: String,
+  source: String,
+  colour: Bool,
+  highlight: fn(String) -> String,
+) -> String {
   let index = span.line_index(source)
   let start = span.position(index, diagnostic.span.start)
   let end = span.position(index, diagnostic.span.end)
@@ -66,15 +79,17 @@ pub fn render(
     Error -> #("error", red)
     Warning -> #("warning", yellow)
   }
-  let paint = case colour {
-    True -> paint
-    False -> fn(s) { s }
+  let plain = fn(s) { s }
+  let #(paint, bold, label, dim, code) = case colour {
+    True -> #(paint, style.bold, style.error, style.dim, highlight)
+    False -> #(plain, plain, plain, plain, plain)
   }
-  let bold = case colour {
-    True -> bold
-    False -> fn(s) { s }
+  let label = case diagnostic.severity {
+    Error -> label
+    Warning if colour -> style.warning
+    Warning -> plain
   }
-  let header = bold(paint(kind) <> ": " <> diagnostic.title)
+  let header = label(kind) <> bold(": " <> diagnostic.title)
   let location =
     path
     <> ":"
@@ -82,19 +97,18 @@ pub fn render(
     <> ":"
     <> int.to_string(prefix_chars + 1)
   let caret =
-    gutter
-    <> " │ "
+    dim(gutter <> " │ ")
     <> string.repeat(" ", prefix_chars)
     <> paint(string.repeat("^", width) <> " " <> diagnostic.label)
   let hint = case diagnostic.hint {
-    Some(h) -> "\nHint: " <> h <> "\n"
+    Some(h) -> "\n" <> bold("Hint:") <> " " <> h <> "\n"
     None -> ""
   }
   [
     header,
-    gutter <> " ┌─ " <> location,
-    gutter <> " │",
-    line_no <> " │ " <> line_text,
+    dim(gutter <> " ┌─ ") <> location,
+    dim(gutter <> " │"),
+    dim(line_no <> " │ ") <> code(line_text),
     caret,
   ]
   |> string.join("\n")
@@ -108,8 +122,18 @@ pub fn render_all(
   source: String,
   colour: Bool,
 ) -> String {
+  render_all_highlighted(diagnostics, path, source, colour, fn(line) { line })
+}
+
+pub fn render_all_highlighted(
+  diagnostics: List(Diagnostic),
+  path: String,
+  source: String,
+  colour: Bool,
+  highlight: fn(String) -> String,
+) -> String {
   diagnostics
-  |> list.map(render(_, path, source, colour))
+  |> list.map(render_highlighted(_, path, source, colour, highlight))
   |> string.join("\n")
 }
 
@@ -119,8 +143,4 @@ fn red(text: String) -> String {
 
 fn yellow(text: String) -> String {
   "\u{001b}[33m" <> text <> "\u{001b}[0m"
-}
-
-fn bold(text: String) -> String {
-  "\u{001b}[1m" <> text <> "\u{001b}[0m"
 }

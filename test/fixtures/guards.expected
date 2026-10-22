@@ -1,0 +1,22 @@
+/hello/bea -> 200
+Response(200, "hello bea, from ada")
+/hello/bea -> 429
+Response(429, "{\"error\": \"slow down\"}")
+/hello/bea -> 401
+Response(401, "{\"error\": \"bad token\"}")
+/elsewhere -> 404
+Response(404, "{\"error\": \"no route\"}")
+4
+no even number
+-1
+"found 1"
+"missing b"
+"label: positive"
+"too big"
+"label: not positive"
+[0, 4, 0, 8]
+Ok(3)
+Error("first is not a number")
+Error("second is not a number")
+80
+8080

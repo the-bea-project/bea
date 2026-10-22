@@ -344,6 +344,11 @@ fn statement_containers(src: BitArray, s: Statement) -> List(Container) {
     ast.Use(call:, ..) -> expr_containers(src, call)
     ast.Assert(value:, message:, ..) ->
       list.flat_map([value, ..option.values([message])], expr_containers(src, _))
+    ast.Guard(value:, otherwise:, ..) ->
+      list.append(
+        expr_containers(src, value),
+        block_container(src, otherwise.span, otherwise.body),
+      )
   }
 }
 
@@ -1058,6 +1063,48 @@ fn statement(s: Statement, ctx: Ctx) -> Doc {
           None -> doc.empty
         },
       ])
+    ast.Guard(_, p, annotation, value, otherwise) -> {
+      let head = case p {
+        Some(p) ->
+          doc.concat([
+            pattern(p, ctx),
+            annotation_doc(annotation),
+            t(" ="),
+            assigned(value, ctx),
+          ])
+        None -> expr(value, ctx)
+      }
+      doc.concat([head, otherwise_doc(otherwise, ctx)])
+    }
+  }
+}
+
+/// `else fallback` stays on the line (moving to the next one when it
+/// doesn't fit); several statements make a block.
+fn otherwise_doc(o: ast.Otherwise, ctx: Ctx) -> Doc {
+  let arm = case o.binding {
+    Some(b) -> doc.concat([pattern(b, ctx), t(" -> ")])
+    None -> doc.empty
+  }
+  let inline = fn(d: Doc) {
+    doc.group(doc.nest(doc.concat([doc.line, t("else "), arm, d]), 2))
+  }
+  let leading = fn(stmt) {
+    dict.has_key(ctx.leading, #(o.span, ast.statement_span(stmt).start))
+  }
+  case o.body, dangling(ctx, o.span) {
+    [ast.Expression(e) as stmt], [] | [ast.Return(_, e) as stmt], [] ->
+      case leading(stmt) {
+        True -> doc.concat([t(" else "), arm, block(ctx, o.span, o.body)])
+        False ->
+          inline(
+            el(ctx, o.span, ast.statement_span(stmt), case stmt {
+              ast.Return(..) -> doc.concat([t("return "), expr(e, ctx)])
+              _ -> expr(e, ctx)
+            }),
+          )
+      }
+    stmts, _ -> doc.concat([t(" else "), arm, block(ctx, o.span, stmts)])
   }
 }
 

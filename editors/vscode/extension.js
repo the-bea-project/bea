@@ -41,6 +41,7 @@ function clientOptions() {
     documentSelector: [{ scheme: "file", language: "bea" }],
     initializationOptions: {
       completion: { callParentheses: config.get("completion.callParentheses", true) },
+      format: { organizeImports: config.get("format.organizeImports", true) },
     },
     synchronize: {
       // Changes made outside the editor (git checkout, codegen, ...) still
@@ -103,7 +104,8 @@ async function activate(context) {
       if (
         event.affectsConfiguration("bea.path") ||
         event.affectsConfiguration("bea.gleamPath") ||
-        event.affectsConfiguration("bea.completion")
+        event.affectsConfiguration("bea.completion") ||
+        event.affectsConfiguration("bea.format")
       ) {
         await restart();
       }

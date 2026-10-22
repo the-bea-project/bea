@@ -430,7 +430,7 @@ fn to_case(
 /// The full lowering pipeline for a function or anonymous function body.
 pub fn body(stmts: List(Statement)) -> List(Statement) {
   stmts
-  |> list.map(desugar_stmt)
+  |> desugar_block
   |> hoist_block(Tail)
   |> returns
 }
@@ -438,7 +438,114 @@ pub fn body(stmts: List(Statement)) -> List(Statement) {
 // --- 1. Desugaring -------------------------------------------------------------
 
 fn desugar_stmts(stmts: List(Statement)) -> List(Statement) {
-  list.map(stmts, desugar_stmt)
+  desugar_block(stmts)
+}
+
+/// Desugars a block. A guard takes the rest of the block with it: it
+/// becomes the matching branch of a `case`, whose other branch exits.
+fn desugar_block(stmts: List(Statement)) -> List(Statement) {
+  case stmts {
+    [] -> []
+    [ast.Guard(s, pattern, annotation, value, otherwise), ..rest] -> [
+      ast.Expression(guard_case(
+        s,
+        pattern,
+        annotation,
+        value,
+        otherwise,
+        desugar_block(rest),
+      )),
+    ]
+    [stmt, ..rest] -> [desugar_stmt(stmt), ..desugar_block(rest)]
+  }
+}
+
+/// ```text
+/// pattern = value else fallback     case value {
+/// rest                          =>    pattern -> { rest }
+///                                     _ -> { return fallback }
+///                                   }
+/// ```
+///
+/// `value?` matches `Ok(pattern)` / `Error(binding)`; a guard without a
+/// pattern is a boolean one (`True`). The `return` makes the fallback leave
+/// the function from anywhere, like `?` does; the return lowering pass turns
+/// it back into a plain value where it is in tail position.
+fn guard_case(
+  s: Span,
+  pattern: Option(Pattern),
+  annotation: Option(ast.Type),
+  value: Expr,
+  otherwise: ast.Otherwise,
+  rest: List(Statement),
+) -> Expr {
+  let os = otherwise.span
+  let discard = fn(at) { ast.PDiscard(at, "_") }
+  let binding = option.lazy_unwrap(otherwise.binding, fn() { discard(os) })
+  let constructor = fn(at, name, args: List(Pattern)) {
+    ast.PConstructor(
+      at,
+      None,
+      name,
+      list.map(args, fn(a) { ast.PatternArg(a.span, None, Some(a)) }),
+      False,
+    )
+  }
+  let #(subject, matched, unmatched) = case value, pattern {
+    ast.Try(_, inner), _ -> #(
+      inner,
+      constructor(s, "Ok", [option.lazy_unwrap(pattern, fn() { discard(s) })]),
+      constructor(os, "Error", [binding]),
+    )
+    _, Some(p) -> #(value, p, binding)
+    _, None -> #(
+      value,
+      constructor(s, "True", []),
+      option.lazy_unwrap(otherwise.binding, fn() {
+        constructor(os, "False", [])
+      }),
+    )
+  }
+  let rest = case annotation, pattern {
+    Some(t), Some(ast.PVar(ps, name)) -> [
+      ast.Assign(ps, ast.PVar(ps, name), Some(t), ast.Var(ps, name)),
+      ..rest
+    ]
+    _, _ -> rest
+  }
+  // A guard ending its block: the block's value is the bound variable (or
+  // Nil), like an assignment's.
+  let rest = case rest {
+    [] ->
+      case pattern {
+        Some(ast.PVar(ps, name)) -> [ast.Expression(ast.Var(ps, name))]
+        _ -> [ast.Expression(ast.Constructor(s, None, "Nil"))]
+      }
+    _ -> rest
+  }
+  ast.Case(s, [desugar_expr(subject)], [
+    ast.CaseClause(s, [[matched]], None, ast.Block(s, rest)),
+    ast.CaseClause(
+      os,
+      [[unmatched]],
+      None,
+      ast.Block(os, exit(desugar_block(otherwise.body), os)),
+    ),
+  ])
+}
+
+/// Make a fallback leave the function: its last expression is returned.
+fn exit(stmts: List(Statement), s: Span) -> List(Statement) {
+  case always_returns(stmts) {
+    True -> stmts
+    False ->
+      case list.reverse(stmts) {
+        [ast.Expression(e), ..before] ->
+          list.reverse([ast.Return(e.span, e), ..before])
+        _ ->
+          list.append(stmts, [ast.Return(s, ast.Constructor(s, None, "Nil"))])
+      }
+  }
 }
 
 fn desugar_stmt(stmt: Statement) -> Statement {
@@ -461,6 +568,10 @@ fn desugar_stmt(stmt: Statement) -> Statement {
         False -> ast.Assert(s, desugar_expr(e), Some(desugar_expr(m)))
       }
     ast.Assert(s, e, None) -> ast.Assert(s, desugar_expr(e), None)
+    ast.Guard(..) -> {
+      let assert [lowered] = desugar_block([stmt])
+      lowered
+    }
   }
 }
 
@@ -699,6 +810,10 @@ fn statement_exprs(stmt: Statement) -> List(Expr) {
     ast.Return(value:, ..) -> [value]
     ast.Use(call:, ..) -> [call]
     ast.Assert(value:, message:, ..) -> [value, ..opt_list(message)]
+    ast.Guard(value:, otherwise:, ..) -> [
+      value,
+      ..list.flat_map(otherwise.body, statement_exprs)
+    ]
   }
 }
 
@@ -870,6 +985,8 @@ fn hoist_stmt(stmt: Statement, is_last: Bool, tail: Tail) -> List(Statement) {
       let #(pre2, m) = hoist_option(m, tail)
       list.flatten([pre, pre2, [ast.Assert(s, e, m)]])
     }
+    // Guards are desugared before hoisting.
+    ast.Guard(..) -> [stmt]
   }
 }
 
@@ -1457,6 +1574,9 @@ fn expr_always_returns(e: Expr) -> Bool {
 fn has_return(stmt: Statement) -> Bool {
   case stmt {
     ast.Return(..) -> True
+    ast.Guard(otherwise:, ..) ->
+      list.any(otherwise.body, has_return)
+      || list.any(statement_exprs(stmt), expr_has_return)
     _ -> list.any(statement_exprs(stmt), expr_has_return)
   }
 }

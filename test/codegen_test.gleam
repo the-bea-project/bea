@@ -147,3 +147,55 @@ pub fn float_negate_test() {
   assert string.contains(out, "float.negate(x)")
   assert string.contains(out, "import gleam/float")
 }
+
+// --- Guards ---------------------------------------------------------------------
+
+pub fn guard_becomes_case_with_rest_test() {
+  let out =
+    gleam("pub def f(r) {\n  Ok(x) = r else Error(\"bad\")\n  Ok(x + 1)\n}")
+  assert string.contains(
+    out,
+    "case r {\n    Ok(x) -> Ok(x + 1)\n    _ -> Error(\"bad\")",
+  )
+}
+
+pub fn try_guard_binds_the_error_test() {
+  let out = gleam("pub def f(r) {\n  x = r? else e -> e\n  x\n}")
+  assert string.contains(out, "Ok(x) -> x\n    Error(e) -> e")
+}
+
+pub fn boolean_guard_test() {
+  let out = gleam("pub def f(ok) {\n  ok else 0\n  1\n}")
+  assert string.contains(out, "case ok {\n    True -> 1\n    False -> 0")
+}
+
+pub fn guard_else_on_next_line_test() {
+  let out = gleam("pub def f(r) {\n  Ok(x) = r\n    else 0\n  x\n}")
+  assert string.contains(out, "Ok(x) -> x")
+}
+
+pub fn else_after_if_still_belongs_to_the_if_test() {
+  let out = gleam("pub def f(c) {\n  x = if c { 1 } else { 2 }\n  x\n}")
+  assert string.contains(out, "let x = case c {")
+}
+
+pub fn constructor_fallback_is_not_an_arm_test() {
+  // `else Error(e) -> ...` is an arm; `else Error("x")` is a value.
+  let out = gleam("pub def f(r) {\n  Ok(x) = r else Error(\"x\")\n  Ok(x)\n}")
+  assert string.contains(out, "_ -> Error(\"x\")")
+  let out =
+    gleam("pub def f(r) {\n  Ok(x) = r else Error(e) -> Error(e)\n  Ok(x)\n}")
+  assert string.contains(out, "Error(e) -> Error(e)")
+}
+
+pub fn guard_in_nested_block_leaves_the_function_test() {
+  let out =
+    gleam(
+      "pub def f(n) {\n  y = {\n    True = n > 0 else \"neg\"\n    \"pos\"\n  }\n  y <> \"!\"\n}",
+    )
+  // The fallback is returned from `f`, not used as the value of `y`.
+  assert string.contains(
+    out,
+    "True -> {\n        let y = \"pos\"\n        y <> \"!\"\n      }\n      _ -> \"neg\"",
+  )
+}

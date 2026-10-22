@@ -32,6 +32,7 @@ import bea/codegen
 import bea/compiler
 import bea/diagnostic.{type Diagnostic}
 import bea/formatter
+import bea/imports
 import bea/lsp/assist
 import bea/lsp/index
 import bea/lsp/json.{type Json}
@@ -123,6 +124,8 @@ type State {
     snippets: Bool,
     /// Complete functions with `()` and show their signature.
     call_parens: Bool,
+    /// Organise imports when formatting (see `bea/imports`).
+    organize_imports: Bool,
   )
 }
 
@@ -144,6 +147,7 @@ pub fn main() -> Int {
       verbose: verbose,
       snippets: False,
       call_parens: True,
+      organize_imports: True,
     )
   loop(state)
 }
@@ -345,7 +349,20 @@ fn request(state: State, id: Json, method: String, params: Json) -> State {
         Some(json.Bool(False)) -> False
         _ -> True
       }
-      let state = State(..state, init_params: params, snippets:, call_parens:)
+      let organize_imports = case
+        json.at(params, ["initializationOptions", "format", "organizeImports"])
+      {
+        Some(json.Bool(False)) -> False
+        _ -> True
+      }
+      let state =
+        State(
+          ..state,
+          init_params: params,
+          snippets:,
+          call_parens:,
+          organize_imports:,
+        )
       // Start Gleam early for the workspace project so the first request
       // doesn't have to wait for it.
       case root_path(params) {
@@ -373,10 +390,7 @@ fn request(state: State, id: Json, method: String, params: Json) -> State {
       respond(id, json.Null)
       State(..state, shutting_down: True)
     }
-    "textDocument/formatting" -> {
-      format(state, id, params)
-      state
-    }
+    "textDocument/formatting" -> format(state, id, params)
     "textDocument/documentSymbol" -> {
       document_symbols(state, id, params)
       state
@@ -1591,7 +1605,14 @@ fn forward_at(
       state
     }
     Ok(m) ->
-      case sourcemap.to_gleam_offset_inclusive(m.map, offset) {
+      case
+        case method {
+          "textDocument/completion" ->
+            sourcemap.to_gleam_offset_after(m.map, offset)
+            |> option.map(inside_word(m.map.gleam_source, _))
+          _ -> sourcemap.to_gleam_offset_inclusive(m.map, offset)
+        }
+      {
         Some(gleam_offset) -> {
           let params =
             params
@@ -1626,6 +1647,19 @@ fn forward_at(
           state
         }
       }
+  }
+}
+
+/// Completion requests go to Gleam one byte *inside* the name being typed
+/// rather than right after it. Gleam leaves out the variables bound by a
+/// `use` when the cursor sits at the very end of its body — and Bea turns
+/// every `x = f()?` and early `return` into a `use`, so the variables bound
+/// before them went missing from completions on the line being written.
+/// Gleam takes the whole name around the cursor either way.
+fn inside_word(gleam: String, offset: Int) -> Int {
+  case offset > 0 && is_name_char(span.text(gleam, Span(offset - 1, offset))) {
+    True -> offset - 1
+    False -> offset
   }
 }
 
@@ -2590,36 +2624,78 @@ fn import_insertion_offset(text: String) -> Int {
 
 // --- Native features ------------------------------------------------------------------
 
-fn format(state: State, id: Json, params: Json) -> Nil {
+/// Formatting a Bea document also organises its imports (unless the
+/// client turned that off): grouped, sorted, unused ones removed, obvious
+/// missing ones added.
+fn format(state: State, id: Json, params: Json) -> State {
   let uri = json.string_at(params, ["textDocument", "uri"]) |> option.unwrap("")
   let document =
     position.uri_to_path(uri)
     |> option.then(fn(p) { dict.get(state.docs, p) |> option.from_result })
   case document {
     Some(d) ->
-      case string.ends_with(d.path, ".bea"), formatter.format(d.text) {
-        True, Ok(formatted) if formatted == d.text -> respond(id, json.Array([]))
-        True, Ok(formatted) -> {
-          let index = span.line_index(d.text)
-          respond(
-            id,
-            json.Array([
-              json.object([
-                #(
-                  "range",
-                  position.span_to_range(
-                    index,
-                    Span(0, string.byte_size(d.text)),
-                  ),
-                ),
-                #("newText", json.String(formatted)),
-              ]),
-            ]),
-          )
+      case string.ends_with(d.path, ".bea") {
+        False -> {
+          respond(id, json.Null)
+          state
         }
-        _, _ -> respond(id, json.Null)
+        True -> {
+          let #(state, source) = case state.organize_imports {
+            False -> #(state, d.text)
+            True -> {
+              let #(state, known) = import_knowledge(state, d.path)
+              #(state, imports.organize(d.text, known))
+            }
+          }
+          case formatter.format(source) {
+            Ok(formatted) if formatted == d.text -> respond(id, json.Array([]))
+            Ok(formatted) -> {
+              let index = span.line_index(d.text)
+              respond(
+                id,
+                json.Array([
+                  json.object([
+                    #(
+                      "range",
+                      position.span_to_range(
+                        index,
+                        Span(0, string.byte_size(d.text)),
+                      ),
+                    ),
+                    #("newText", json.String(formatted)),
+                  ]),
+                ]),
+              )
+            }
+            Error(_) -> respond(id, json.Null)
+          }
+          state
+        }
       }
-    None -> respond(id, json.Null)
+    None -> {
+      respond(id, json.Null)
+      state
+    }
+  }
+}
+
+/// The project's modules and what every importable module exports.
+fn import_knowledge(state: State, path: String) -> #(State, imports.Known) {
+  let #(state, key) = ensure_child(state, project_for(path))
+  case dict.get(state.children, key) {
+    Error(_) -> #(state, imports.nothing_known())
+    Ok(child) -> {
+      let child = with_deps_index(child)
+      let state = put_child(state, child)
+      #(
+        state,
+        imports.for_project(child.project, child.deps_index, path, fn(m) {
+          dict.values(child.modules)
+          |> list.find(fn(x) { x.name == m })
+          |> result.map(fn(x) { x.source })
+        }),
+      )
+    }
   }
 }
 

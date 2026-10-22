@@ -1,0 +1,119 @@
+import gleam/io
+
+// A tiny web stack: requests, responses and middleware written with guards.
+
+pub type Request {
+  Request(path: String, ip: String, token: String)
+}
+
+pub type Response {
+  Response(status: Int, body: String)
+}
+
+def blocked(ip: String) -> Bool {
+  ip == "6.6.6.6"
+}
+
+def user_for(token: String) -> Result(String, String) {
+  case token {
+    "" -> Error("no token")
+    "secret" -> Ok("ada")
+    _ -> Error("bad token")
+  }
+}
+
+def json_error(status: Int, message: String) -> Response {
+  Response(status, "{\"error\": \"" <> message <> "\"}")
+}
+
+// "Around" middleware still uses `use`: it runs code after the handler.
+def logged(req: Request, next: fn() -> Response) -> Response {
+  response = next()
+  io.println(req.path <> " -> " <> int.to_string(response.status))
+  response
+}
+
+pub def handle(req: Request) -> Response {
+  use <- logged(req)
+  // Boolean guard: the condition must hold, else the function returns.
+  not blocked(req.ip) else json_error(429, "slow down")
+  // `?` guard: unwrap Ok, the error is bound for the fallback.
+  user = user_for(req.token)? else reason -> json_error(401, reason)
+  // Pattern guard.
+  "/hello/" <> name = req.path else json_error(404, "no route")
+  Response(200, "hello " <> name <> ", from " <> user)
+}
+
+// Any pattern, multi-statement fallbacks, explicit returns.
+def first_even(xs: List(Int)) -> Int {
+  [first | _] = list.filter(xs, int.is_even) else {
+    io.println("no even number")
+    -1
+  }
+  first
+}
+
+def lookup(key: String) -> String {
+  Some(v) = dict.get(dict.from_list([("a", "1")]), key) |> option.from_result
+    else return "missing " <> key
+  "found " <> v
+}
+
+// A guard inside a nested block leaves the whole function, like `?`.
+def nested(n: Int) -> String {
+  label = if n > 0 {
+    True = n < 100 else "too big"
+    "positive"
+  } else {
+    "not positive"
+  }
+  "label: " <> label
+}
+
+// Inside an anonymous function, a guard leaves that function only.
+def doubled_evens(xs: List(Int)) -> List(Int) {
+  list.map(xs, fn(x) {
+    0 = x % 2 else 0
+    x * 2
+  })
+}
+
+// Guards combine with `?` in the rest of the function.
+def parse_both(a: String, b: String) -> Result(Int, String) {
+  x: Int = int.parse(a)? else Error("first is not a number")
+  y = (int.parse(b) |> result.replace_error("second is not a number"))?
+  Ok(x + y)
+}
+
+// `?` without binding the error, and a guard ending its block.
+def port(text: String) -> Int {
+  p = int.parse(text)? else 8080
+  p
+}
+
+def show(value) {
+  io.println(string.inspect(value))
+}
+
+pub def main() {
+  [
+    Request("/hello/bea", "1.2.3.4", "secret"),
+    Request("/hello/bea", "6.6.6.6", "secret"),
+    Request("/hello/bea", "1.2.3.4", "nope"),
+    Request("/elsewhere", "1.2.3.4", "secret"),
+  ]
+  |> list.each(fn(req) { show(handle(req)) })
+  show(first_even([1, 3, 4, 6]))
+  show(first_even([1, 3]))
+  show(lookup("a"))
+  show(lookup("b"))
+  show(nested(5))
+  show(nested(500))
+  show(nested(-1))
+  show(doubled_evens([1, 2, 3, 4]))
+  show(parse_both("1", "2"))
+  show(parse_both("x", "2"))
+  show(parse_both("1", "y"))
+  show(port("80"))
+  show(port("eighty"))
+}

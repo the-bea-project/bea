@@ -135,6 +135,27 @@ pub type Statement {
   Use(span: Span, patterns: List(UsePattern), call: Expr)
   /// `assert x == y` / `assert x as "message"`
   Assert(span: Span, value: Expr, message: Option(Expr))
+  /// A guard: `pattern = value else fallback`. When `value` doesn't match
+  /// `pattern`, the enclosing function returns `fallback` and the rest of
+  /// the block never runs — `?` for any pattern, with any exit value.
+  ///
+  /// - `pattern` is None for a boolean guard: `allowed(ip) else deny()`.
+  /// - With `value?` the pattern matches the `Ok` payload, and the `else`
+  ///   can bind the error: `user = auth(req)? else e -> deny(e)`.
+  Guard(
+    span: Span,
+    pattern: Option(Pattern),
+    annotation: Option(Type),
+    value: Expr,
+    otherwise: Otherwise,
+  )
+}
+
+/// The `else` of a guard: `else fallback`, `else { ... }`, or
+/// `else pattern -> fallback` where `pattern` binds what didn't match (the
+/// error, for `value?`).
+pub type Otherwise {
+  Otherwise(span: Span, binding: Option(Pattern), body: List(Statement))
 }
 
 pub type UsePattern {
@@ -310,6 +331,7 @@ pub fn statement_span(statement: Statement) -> Span {
     Return(span:, ..) -> span
     Use(span:, ..) -> span
     Assert(span:, ..) -> span
+    Guard(span:, ..) -> span
   }
 }
 

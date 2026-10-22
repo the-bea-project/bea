@@ -6,7 +6,10 @@
     stdio_binary/0, read_line_bytes/0, read_bytes/1, write_bytes/1,
     open_port_process/3, port_send/2, port_close/1, spawn_stdin_reader/0,
     receive_event/1, monotonic_ms/0, absolute_path/1, init/0, hash/1, split_frames/1,
-    foreground_child/0, was_interrupted/0, file_exists/1, no_foreground/0
+    foreground_child/0, was_interrupted/0, file_exists/1, no_foreground/0,
+    shell_read_line/1, set_cwd/1, prepend_to_path/1,
+    shell_code_paths/2, package_dir/1, shell_raw_mode/0, shell_restore_mode/1,
+    shell_read_char/0, shell_write/1
 ]).
 
 init() ->
@@ -492,3 +495,97 @@ content_length(Header) ->
             _ -> Acc
         end
     end, error, Lines).
+
+%% --- `bea shell` ---------------------------------------------------------------
+
+shell_read_line(Prompt) ->
+    case io:get_line(standard_io, Prompt) of
+        eof -> {error, nil};
+        {error, _} -> {error, nil};
+        Data -> {ok, unicode:characters_to_binary(Data)}
+    end.
+
+set_cwd(Path) ->
+    _ = file:set_cwd(unicode:characters_to_list(Path)),
+    nil.
+
+prepend_to_path(Dir) ->
+    Old = case os:getenv("PATH") of false -> ""; P -> P end,
+    os:putenv("PATH", unicode:characters_to_list(Dir) ++ ":" ++ Old),
+    nil.
+
+%% The shell runs the project's code in Bea's own VM. First every module of
+%% Bea and its dependencies (gsh included) is loaded, so they keep working
+%% whatever the project brings; then the project's build directories are
+%% put in front of the code path. Returns the project modules that can't be
+%% loaded because Bea already has a module of that name (e.g. a project
+%% `ffi.erl`, the name of gsh's FFI module).
+shell_code_paths(BuildDir, Package) ->
+    Otp = code:lib_dir(),
+    Own = [P || P <- code:get_path(), not lists:prefix(Otp, P), P =/= "."],
+    lists:foreach(fun(Dir) ->
+        lists:foreach(fun(Beam) ->
+            Module = list_to_atom(filename:basename(Beam, ".beam")),
+            _ = code:ensure_loaded(Module)
+        end, filelib:wildcard(filename:join(Dir, "*.beam")))
+    end, Own),
+    Base = unicode:characters_to_list(BuildDir),
+    Paths = filelib:wildcard(filename:join([Base, "build", "dev", "erlang", "*", "ebin"])),
+    lists:foreach(fun(P) -> code:add_patha(P) end, Paths),
+    ProjectEbin = filename:join([Base, "build", "dev", "erlang",
+                                 unicode:characters_to_list(Package), "ebin"]),
+    Clashes = [list_to_binary(filename:basename(B, ".beam"))
+               || B <- filelib:wildcard(filename:join(ProjectEbin, "*.beam")),
+                  is_clash(list_to_atom(filename:basename(B, ".beam")), B)],
+    Clashes.
+
+is_clash(Module, Beam) ->
+    case code:is_loaded(Module) of
+        {file, Loaded} when is_list(Loaded) ->
+            filename:dirname(Loaded) =/= filename:dirname(Beam);
+        _ -> false
+    end.
+
+%% Directory of a package Bea itself was built with (`.../simplifile`).
+package_dir(Name) ->
+    case code:lib_dir(binary_to_atom(Name, utf8)) of
+        {error, _} -> {error, nil};
+        Dir -> {ok, unicode:characters_to_binary(Dir)}
+    end.
+
+%% The shell's line editor reads keys in raw mode, which OTP provides with
+%% `-noshell` from OTP 28 (`shell:start_interactive({noshell, raw})`; it
+%% doesn't deliver input on OTP 27). Elsewhere, or when stdin isn't a
+%% terminal, lines are read as they are (`{error, nil}`).
+shell_raw_mode() ->
+    Otp = list_to_integer(erlang:system_info(otp_release)),
+    StdinIsTerminal = case file:read_file_info("/dev/stdin") of
+        {ok, Info} -> element(3, Info) =:= device;
+        _ -> false
+    end,
+    case Otp >= 28 andalso StdinIsTerminal of
+        false -> {error, nil};
+        true ->
+            try shell:start_interactive({noshell, raw}) of
+                ok -> {ok, <<"raw">>};
+                _ -> {error, nil}
+            catch _:_ -> {error, nil}
+            end
+    end.
+
+shell_restore_mode(_) ->
+    try shell:start_interactive({noshell, cooked}) of
+        _ -> nil
+    catch _:_ -> nil
+    end.
+
+shell_read_char() ->
+    case io:get_chars(standard_io, "", 1) of
+        eof -> {error, nil};
+        {error, _} -> {error, nil};
+        C -> {ok, unicode:characters_to_binary(C)}
+    end.
+
+shell_write(Text) ->
+    io:put_chars(standard_io, Text),
+    nil.

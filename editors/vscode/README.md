@@ -5,7 +5,8 @@ errors and Gleam type errors mapped back onto your `.bea` code), hover,
 go to definition, references, rename, completion, signature help, formatting
 and document symbols.
 
-Completion works while you type (after `module.`, inside unfinished calls),
+Completion works while you type (after `module.`, inside unfinished calls,
+in every branch of `case`/`cond`/`if`, after `?` and early returns),
 offers functions from modules you haven't imported yet and adds the import,
 and completes calls as `name(|)` with the signature popping up. Signature help
 shows parameter names and follows the argument you are on. Go to definition
@@ -15,6 +16,10 @@ Settings:
 
 - `bea.path`, `bea.gleamPath`: where the executables are
 - `bea.completion.callParentheses` (default on): complete functions with `()`
+- `bea.format.organizeImports` (default on): formatting also organises
+  imports — grouped (standard library, dependencies, project) and sorted,
+  unused ones removed, obvious missing ones added. With
+  `"editor.formatOnSave": true` this happens on every save.
 
 Commands: **Bea: Restart Language Server**, **Bea: Show Generated Gleam**.
 

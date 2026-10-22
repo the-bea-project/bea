@@ -718,6 +718,10 @@ fn statements(
 }
 
 fn statement(ts: Tokens) -> Parsed(Statement) {
+  guarded(plain_statement(ts))
+}
+
+fn plain_statement(ts: Tokens) -> Parsed(Statement) {
   case ts {
     // A bare `return` returns Nil.
     [Token(lexer.Return, s, _), Token(lexer.RBrace, _, _) as next, ..rest]
@@ -759,6 +763,55 @@ fn statement(ts: Tokens) -> Parsed(Statement) {
           }
         }
       }
+  }
+}
+
+/// `pattern = value else fallback` and `condition else fallback` (the
+/// `else` may start the next line).
+fn guarded(parsed: Parsed(Statement)) -> Parsed(Statement) {
+  use #(stmt, rest) <- result.try(parsed)
+  case stmt, rest {
+    ast.Assign(s, p, annotation, value), [Token(lexer.Else, es, _), ..rest] -> {
+      use #(o, rest) <- result.try(otherwise(es, rest))
+      Ok(#(ast.Guard(sp(s, o.span), Some(p), annotation, value, o), rest))
+    }
+    ast.Expression(e), [Token(lexer.Else, es, _), ..rest] -> {
+      use #(o, rest) <- result.try(otherwise(es, rest))
+      Ok(#(ast.Guard(sp(e.span, o.span), None, None, e, o), rest))
+    }
+    _, _ -> Ok(#(stmt, rest))
+  }
+}
+
+/// After `else`: `{ ... }`, `pattern -> fallback`, or a fallback.
+fn otherwise(start: Span, ts: Tokens) -> Parsed(ast.Otherwise) {
+  let arm = case ts {
+    [Token(lexer.LBrace, _, _), ..] -> None
+    _ ->
+      case pattern(ts) {
+        Ok(#(p, [Token(lexer.Arrow, _, _), ..rest])) -> Some(#(p, rest))
+        _ -> None
+      }
+  }
+  let #(binding, ts) = case arm {
+    Some(#(p, rest)) -> #(Some(p), rest)
+    None -> #(None, ts)
+  }
+  use #(#(body, end), rest) <- result.try(fallback(ts))
+  Ok(#(ast.Otherwise(sp(start, end), binding, body), rest))
+}
+
+fn fallback(ts: Tokens) -> Parsed(#(List(Statement), Span)) {
+  case ts {
+    [Token(lexer.LBrace, _, _), ..rest] -> block_body(rest)
+    [Token(lexer.Return, _, _), ..] -> {
+      use #(stmt, rest) <- result.try(plain_statement(ts))
+      Ok(#(#([stmt], ast.statement_span(stmt)), rest))
+    }
+    _ -> {
+      use #(e, rest) <- result.try(expression(ts))
+      Ok(#(#([ast.Expression(e)], e.span), rest))
+    }
   }
 }
 
@@ -859,7 +912,14 @@ fn binary(ts: Tokens, min: Int) -> Parsed(Expr) {
 
 fn binary_loop(left: Expr, ts: Tokens, min: Int) -> Parsed(Expr) {
   let t = peek(ts)
-  case binop(t) {
+  let op = case ts {
+    // `%{` starting a line is a map literal, not `left % {block}`.
+    [Token(lexer.Percent, p, True), Token(lexer.LBrace, b, _), ..]
+      if p.end == b.start
+    -> None
+    _ -> binop(t)
+  }
+  case op {
     Some(op) -> {
       let prec = ast.precedence(op)
       case prec >= min {

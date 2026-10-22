@@ -255,7 +255,29 @@ pub def main() {
         "textDocument/formatting",
         {"textDocument": {"uri": doc["uri"]}, "options": {"tabSize": 2, "insertSpaces": True}},
     )
-    check("formatting returns an edit", edits and edits[0]["newText"] == text, json.dumps(edits)[:300])
+    grouped = text.replace(
+        "import app/helper\nimport app/maths.{Circle}\nimport gleam/io\n",
+        "import gleam/io\n\nimport app/helper\nimport app/maths.{Circle}\n",
+    )
+    check("formatting returns an edit", edits and edits[0]["newText"] == grouped, json.dumps(edits)[:300])
+
+    # Formatting organises imports: grouped and sorted, unused ones removed,
+    # an obvious missing one (`words.shout`, only app/words has it) added.
+    messy_imports = text.replace(
+        "import app/helper\nimport app/maths.{Circle}\nimport gleam/io\n",
+        "import gleam/io\nimport app/maths.{Circle, Rect}\nimport gleam/json\nimport app/helper\n",
+    ).replace("  shape = Circle(2.0)\n", "  shape = Circle(2.0)\n  _ = words.shout(\"a\", 2)\n")
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 7}, "contentChanges": [{"text": messy_imports}]},
+    )
+    edits = client.request(
+        "textDocument/formatting",
+        {"textDocument": {"uri": doc["uri"]}, "options": {"tabSize": 2, "insertSpaces": True}},
+    )
+    organized = edits[0]["newText"] if edits else ""
+    expected_head = "import gleam/io\n\nimport app/helper\nimport app/maths.{Circle}\nimport app/words\n\npub def main"
+    check("formatting organises imports", organized.startswith(expected_head), organized[:300])
 
     # Document symbols (native)
     client.notify(
@@ -345,7 +367,32 @@ pub def main() {
     # A dependency function, with its parameter names from the package source.
     sig = signature(text.replace("n = maths.square(4)", 'n = string.pad_start("a", '), 'string.pad_start("a", ', 28)
     check("signature help for a dependency has parameter names", sig and "desired_length" in sig["signatures"][0]["label"], json.dumps(sig))
-    edit(text, 29)
+    # Locals and functions inside control flow. Bea lowers these to Gleam
+    # code of a different shape (`bool.guard`, `use ... <- result.try`, case
+    # on booleans), which used to send the cursor to the wrong Gleam token.
+    flow_cases = [
+        ("else branch", "  if n > 1 {\n    1\n  } else {\n    sha@@\n  }\n"),
+        ("return inside if", "  if n > 1 {\n    return sha@@\n  }\n  0\n"),
+        ("after an early return", "  if n > 1 {\n    return 0\n  }\n  sha@@\n"),
+        ("after `?`", "  m = int.parse(\"1\")?\n  m + sha@@\n"),
+        ("case clause body", "  case n {\n    0 -> sha@@\n    _ -> 1\n  }\n"),
+        ("cond clause body", "  cond {\n    n > 1 -> sha@@\n    _ -> 1\n  }\n"),
+        ("end of a use body", "  use x <- list.each([1])\n  x + sha@@\n"),
+        ("map literal on its own line", "  %{\"k\": sha@@}\n"),
+    ]
+    version = 40
+    for name, body in flow_cases:
+        flow = text.replace("  echo maths.area(shape)\n", body.replace("@@", ""))
+        cursor = text.replace("  echo maths.area(shape)\n", body).index("@@")
+        edit(flow, version)
+        before = flow[:cursor]
+        p = {"line": before.count("\n"), "character": len(before) - (before.rfind("\n") + 1)}
+        res = client.request("textDocument/completion", {"textDocument": {"uri": doc["uri"]}, "position": p})
+        items = res["items"] if isinstance(res, dict) else (res or [])
+        labels = [i["label"] for i in items]
+        check(f"completion {name}: locals and functions", "shape" in labels and "n" in labels and "main" in labels, json.dumps(labels[:15]))
+        version += 1
+    edit(text, version)
 
     # --- FFI ------------------------------------------------------------------------
     native_path = os.path.join(project, "src", "app", "native.bea")
