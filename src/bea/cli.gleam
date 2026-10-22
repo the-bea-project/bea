@@ -77,8 +77,8 @@ Building:
 
 Code:
   format [PATHS]...    Format Bea source files (--check, --stdin)
-  transpile [FILE]     Print the Gleam code generated for a file
-                       (or write the whole project with --out DIR)
+  transpile [FILE]     Print the Gleam code generated for a file (or
+                       --stdin; --out DIR writes the whole project)
   lsp                  Run the language server, to be used by editors
 
 Publishing:
@@ -380,7 +380,6 @@ fn compile_command(command: String, args: List(String)) -> Int {
 
 fn run(args: List(String)) -> Int {
   let #(args, program_args) = split_args(args)
-  // Pull out the bits Bea understands; everything else goes to `gleam run`.
   let #(file, module, gleam_args) = parse_run_args(args, None, None, [])
   let resolved = case file {
     Some(f) ->
@@ -392,40 +391,189 @@ fn run(args: List(String)) -> Int {
   }
   use p <- or_exit(resolved)
   let module = case module, file {
-    Some(m), _ -> Some(m)
-    None, Some(f) -> Some(project.module_name(p, system.absolute_path(f)))
-    None, None -> default_module(p)
+    Some(m), _ -> m
+    None, Some(f) -> project.module_name(p, system.absolute_path(f))
+    None, None -> default_module(p) |> option.unwrap(p.name)
   }
+  let #(target, runtime, build_args) = run_target(p, gleam_args)
   use s <- or_exit(sync(p))
-  use exe <- or_exit(gleam())
-  let module_args = case module {
-    Some(m) -> ["-m", m]
-    None -> []
+  // Build in .beabuild/, then run the program ourselves from the project
+  // root (not from .beabuild/ like `gleam run` would), so relative paths,
+  // `.env` files & co resolve against the user's project.
+  let code = case run_gleam(p, s, ["build", ..build_args]) {
+    0 ->
+      case system.was_interrupted() {
+        // Ctrl+C while building: don't start the program.
+        Ok(code) -> code
+        Error(_) -> run_program(p, s, target, runtime, module, program_args)
+      }
+    code -> code
   }
-  let full =
-    list.flatten([
-      ["run"],
-      module_args,
-      gleam_args,
-      case program_args {
-        [] -> []
-        _ -> ["--", ..program_args]
-      },
-    ])
-  // stdin/stdout stay attached to the terminal; stderr (compiler messages,
-  // `echo`, crashes) goes through the location rewriter.
-  let rewriter = gleam_output.new(s.modules, p.build_dir, p.src_dir, colour())
-  let #(code, rewriter) =
-    system.run_stderr_lines(exe, full, p.build_dir, rewriter, fn(r, line) {
-      let #(r, lines) = gleam_output.feed(r, line)
-      list.each(lines, fn(l) { system.print_stderr(l <> "\n") })
-      r
-    })
-  list.each(gleam_output.finish(rewriter), fn(l) {
-    system.print_stderr(l <> "\n")
-  })
   project.sync_back(p, False)
   code
+}
+
+type Target {
+  Erlang
+  JavaScript
+}
+
+/// The compile target and JavaScript runtime for `bea run`, and the
+/// arguments to pass on to `gleam build` (which doesn't know `--runtime`).
+fn run_target(
+  p: Project,
+  args: List(String),
+) -> #(Target, String, List(String)) {
+  let parse_target = fn(t) {
+    case t {
+      "javascript" | "js" -> JavaScript
+      _ -> Erlang
+    }
+  }
+  let #(target, runtime, rest) = collect_run_flags(args, None, None, [])
+  let target = case target {
+    Some(t) -> parse_target(t)
+    None -> parse_target(config_value(p.config, "target") |> option.unwrap(""))
+  }
+  let runtime = case runtime {
+    Some(r) -> r
+    None -> config_value(p.config, "runtime") |> option.unwrap("nodejs")
+  }
+  #(target, runtime, rest)
+}
+
+fn collect_run_flags(
+  args: List(String),
+  target: Option(String),
+  runtime: Option(String),
+  rest: List(String),
+) -> #(Option(String), Option(String), List(String)) {
+  case args {
+    [] -> #(target, runtime, list.reverse(rest))
+    ["--target", t, ..more] | ["-t", t, ..more] ->
+      collect_run_flags(more, Some(t), runtime, [t, "--target", ..rest])
+    ["--target=" <> t, ..more] ->
+      collect_run_flags(more, Some(t), runtime, ["--target=" <> t, ..rest])
+    ["--runtime", r, ..more] -> collect_run_flags(more, target, Some(r), rest)
+    ["--runtime=" <> r, ..more] ->
+      collect_run_flags(more, target, Some(r), rest)
+    [a, ..more] -> collect_run_flags(more, target, runtime, [a, ..rest])
+  }
+}
+
+/// A `key = "value"` from the configuration (top-level keys only).
+fn config_value(config: String, key: String) -> Option(String) {
+  config
+  |> string.split("\n")
+  |> list.take_while(fn(line) { !string.starts_with(string.trim(line), "[") })
+  |> list.find_map(fn(line) {
+    case string.split_once(line, "=") {
+      Ok(#(k, v)) if k != "" ->
+        case string.trim(k) == key {
+          True ->
+            case string.trim(v) {
+              "\"" <> quoted ->
+                string.split_once(quoted, "\"")
+                |> result.map(fn(parts) { parts.0 })
+              bare ->
+                Ok(
+                  string.split_once(bare, "#")
+                  |> result.map(fn(parts) { string.trim(parts.0) })
+                  |> result.unwrap(bare),
+                )
+            }
+          False -> Error(Nil)
+        }
+      _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// Run `main` of a built module, the way `gleam run` does: on Erlang through
+/// the `<package>@@main` entrypoint Gleam generates (it starts the
+/// application so `application:get_key/2` & co work, and prints panics
+/// nicely), on JavaScript through a small entry module.
+fn run_program(
+  p: Project,
+  s: project.Sync,
+  target: Target,
+  runtime: String,
+  module: String,
+  program_args: List(String),
+) -> Int {
+  let rewriter = gleam_output.new(s.modules, p.build_dir, p.src_dir, colour())
+  let command = case target {
+    Erlang -> {
+      let lib = p.build_dir <> "/build/dev/erlang"
+      let ebin =
+        simplifile.read_directory(lib)
+        |> result.unwrap([])
+        |> list.sort(string.compare)
+        |> list.filter_map(fn(dir) {
+          let path = lib <> "/" <> dir <> "/ebin"
+          case simplifile.is_directory(path) {
+            Ok(True) -> Ok(["-pa", path])
+            _ -> Error(Nil)
+          }
+        })
+        |> list.flatten
+      let erlang_module = string.replace(module, "/", "@")
+      Ok(#(
+        "erl",
+        list.flatten([
+          ebin,
+          [
+            // No BREAK menu if a Ctrl+C reaches the program: just stop.
+            "+Bd",
+            "-eval",
+            "'" <> p.name <> "@@main':run('" <> erlang_module <> "')",
+            "-noshell",
+            "-extra",
+          ],
+          program_args,
+        ]),
+      ))
+    }
+    JavaScript -> {
+      let dir = p.build_dir <> "/build/dev/javascript/" <> p.name
+      let entry = dir <> "/bea@@main.mjs"
+      project.write_if_changed(
+        entry,
+        "import { main } from \"./" <> module <> ".mjs\";\nmain();\n",
+      )
+      case runtime {
+        "deno" -> Ok(#("deno", ["run", "--allow-all", entry, ..program_args]))
+        "bun" -> Ok(#("bun", ["run", entry, ..program_args]))
+        _ -> Ok(#("node", [entry, ..program_args]))
+      }
+    }
+  }
+  let found =
+    result.try(command, fn(c) {
+      case system.find_executable(c.0) {
+        Ok(exe) -> Ok(#(exe, c.1))
+        Error(_) -> Error("`" <> c.0 <> "` was not found on your PATH")
+      }
+    })
+  case found {
+    Error(message) -> {
+      error(message)
+      1
+    }
+    Ok(#(exe, args)) -> {
+      let #(code, rewriter) =
+        system.run_stderr_lines(exe, args, p.root, rewriter, fn(r, line) {
+          let #(r, lines) = gleam_output.feed(r, line)
+          list.each(lines, fn(l) { system.print_stderr(l <> "\n") })
+          r
+        })
+      list.each(gleam_output.finish(rewriter), fn(l) {
+        system.print_stderr(l <> "\n")
+      })
+      code
+    }
+  }
 }
 
 fn parse_run_args(
@@ -588,31 +736,32 @@ fn transpile(args: List(String)) -> Int {
       status("Wrote", dir)
       0
     }
+    ["--stdin"] -> transpile_source(system.read_stdin(), "<stdin>")
     [file] ->
       case simplifile.read(file) {
         Error(_) -> {
           error("Could not read " <> file)
           1
         }
-        Ok(source) ->
-          case compiler.compile(source, codegen.empty_context()) {
-            Ok(c) -> {
-              io.print(c.gleam)
-              0
-            }
-            Error(diags) -> {
-              system.print_stderr(diagnostic.render_all(
-                diags,
-                file,
-                source,
-                colour(),
-              ))
-              1
-            }
-          }
+        Ok(source) -> transpile_source(source, file)
       }
     _ -> {
-      error("Usage: bea transpile <FILE.bea> | bea transpile --out <DIR>")
+      error(
+        "Usage: bea transpile <FILE.bea> | bea transpile --stdin | bea transpile --out <DIR>",
+      )
+      1
+    }
+  }
+}
+
+fn transpile_source(source: String, name: String) -> Int {
+  case compiler.compile(source, codegen.empty_context()) {
+    Ok(c) -> {
+      io.print(c.gleam)
+      0
+    }
+    Error(diags) -> {
+      system.print_stderr(diagnostic.render_all(diags, name, source, colour()))
       1
     }
   }

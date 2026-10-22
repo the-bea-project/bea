@@ -7,5 +7,10 @@ import bea/system
 pub fn main() -> Nil {
   system.init()
   let code = cli.main(argv.load().arguments)
+  // A program stopped by Ctrl+C / SIGTERM: report it like a shell would.
+  let code = case system.was_interrupted() {
+    Ok(signal_code) -> signal_code
+    Error(_) -> code
+  }
   system.halt(code)
 }

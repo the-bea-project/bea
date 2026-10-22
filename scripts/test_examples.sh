@@ -39,11 +39,13 @@ for f in test/fixtures/*.bea; do
   fi
 done
 
-# --- 2. exercism examples (script mode) ------------------------------------------
+# --- 2. exercism examples ----------------------------------------------------------
 cp -r beacode "$WORK/beacode"
-for f in "$WORK"/beacode/*.bea; do
+for f in "$WORK"/beacode/src/*.bea; do
   name=$(basename "$f" .bea)
-  if (cd "$WORK/beacode" && $BEA run "$name.bea" >"$WORK/run.log" 2>&1); then
+  # Library-style exercises have no `main`: building them is the test.
+  grep -q "^pub def main" "$f" || { (cd "$WORK/beacode" && $BEA build >"$WORK/run.log" 2>&1) && pass "example $name (build)" || { fail "example $name"; tail -20 "$WORK/run.log"; }; continue; }
+  if (cd "$WORK/beacode" && $BEA run -m "$name" </dev/null >"$WORK/run.log" 2>&1); then
     pass "example $name"
   else
     fail "example $name"; tail -20 "$WORK/run.log"
@@ -52,7 +54,7 @@ done
 
 # --- 3. formatter -------------------------------------------------------------
 mkdir -p "$WORK/format"
-cp beacode/*.bea test/fixtures/*.bea "$WORK/format/"
+cp beacode/src/*.bea test/fixtures/*.bea "$WORK/format/"
 if $BEA format "$WORK/format" >"$WORK/format.log" 2>&1; then
   pass "format all files"
 else

@@ -149,6 +149,9 @@ pub type Sync {
     warnings: List(FileErrors),
     /// Files in the build directory whose content changed in this sync.
     written: List(String),
+    /// What code generation knew about the project's modules (the language
+    /// server compiles edited copies of a module with it).
+    context: codegen.Context,
   )
 }
 
@@ -461,7 +464,13 @@ pub fn sync_cached(
   })
 
   #(
-    Sync(modules, list.reverse(errors), list.reverse(warnings), written_copies),
+    Sync(
+      modules,
+      list.reverse(errors),
+      list.reverse(warnings),
+      written_copies,
+      ctx,
+    ),
     Cache(entries),
   )
 }

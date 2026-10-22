@@ -84,7 +84,7 @@ my_app/
 | `bea build` | Build (`--target javascript`, `--warnings-as-errors`, ...) |
 | `bea run [FILE.bea \| -m MODULE] [-- ARGS]` | Run a module's `main` |
 | `bea format [--check] [--stdin] [PATHS]` | Format `.bea` files |
-| `bea transpile FILE.bea` | Print the Gleam generated for a file |
+| `bea transpile FILE.bea` | Print the Gleam generated for a file (`--stdin` reads the source from stdin) |
 | `bea transpile --out DIR` | Write the project out as a plain Gleam project ("eject") |
 | `bea export erlang-shipment\|escript\|...` | Gleam's export commands |
 | `bea publish` | Publish to Hex (as the generated Gleam package) |
@@ -110,6 +110,24 @@ The <> operator expects arguments of this type:
 
 Outside a project, `bea run some/dir/file.bea` treats `some/dir` as the
 source directory, which is handy for scripts and exercises.
+
+`bea run` builds the project and runs `main` the way `gleam run` does (the
+OTP application is started, panics are printed with Bea locations), but from
+the project root rather than from `.beabuild/`, so relative paths and `.env`
+files resolve against your project. `--target javascript` runs it on Node
+(`--runtime bun` / `deno` for those).
+
+Ctrl+C stops the program and gives the terminal back exactly as it was.
+Programs started by an Erlang VM live in a session of their own, so they
+never see the Ctrl+C themselves: the launcher starts Bea's VM with `+Bi` and
+turns the interrupt into a SIGTERM that Bea forwards to the program, waiting
+for it to be gone before exiting (a gleepack build does the same; its runtime
+starts programs in Bea's session, so Bea moves them to their own with
+`setsid`). Should Bea itself be killed, a watchdog removes the program and
+everything it started. (Before, the program kept
+running, holding its port, and reset the terminal mode when it finally exited
+— the shell then echoed its own terminal queries as `^[]11;rgb:...^[[?62;52;c`
+garbage.) You no longer need `ERL_FLAGS=+B` for this.
 
 ### Using Gleam packages
 
@@ -162,6 +180,11 @@ Bea projects depend on Gleam packages the same way. Fill in `description`,
 The CLI is a normal Gleam program (`bea.main`). Package it with gleepack, or
 with `gleam export erlang-shipment`. For development, `scripts/bea` runs the
 CLI straight from this checkout after `gleam build`.
+
+Ctrl+C works with both: `scripts/bea` starts the VM with `+Bi` and turns
+SIGINT into a SIGTERM, and gleepack's runtime does that conversion itself.
+Any other launcher should do the same; without it, Ctrl+C still stops the
+program (through the watchdog), but Bea itself dies before it.
 
 ## Language guide
 
@@ -405,12 +428,28 @@ translates between Bea and Gleam positions, so you get Gleam's type checking and
 IDE features on `.bea` files:
 
 - diagnostics (Bea syntax errors, and Gleam type errors on the right Bea span)
-- hover with types and doc comments, go to definition (into Bea files, your
-  Gleam modules, or dependency sources), find references, highlights, rename
-- completion — including right after `module.` while the line doesn't parse yet
-- signature help, document symbols, and formatting (Bea's own formatter)
+- hover with the declaration (parameter names, where it comes from) and doc
+  comments, go to definition (into Bea files, your Gleam modules, or
+  dependency sources), find references, highlights, rename
+- completion that works while you type: right after `timestamp.`, inside an
+  unfinished call or constructor (`Context(timestamp.|`), with the brackets
+  not closed yet. The buffer is compiled with a placeholder at the cursor and
+  whatever is open closed (`bea/lsp/repair`)
+- completion of functions, constants and constructors from modules you
+  haven't imported — your own modules and your dependencies' — adding the
+  `import` when you pick one; functions complete as calls, `name(|)`, with
+  their signature shown (`bea.completion.callParentheses` in VS Code)
+- signature help that follows the argument you are on, labels included,
+  shows parameter names (`timestamp.add(timestamp: Timestamp, duration:
+  Duration)`) and works in unfinished code
+- `@external` interop: go to definition and hover on an `@external(...)`
+  open the Erlang / JavaScript function it binds (`.erl` / `.mjs` in `src/` or
+  in a dependency)
+- document symbols, and formatting (Bea's own formatter)
 
-**VS Code**: see `editors/vscode` (`npm install && npx vsce package`).
+**VS Code**: see `editors/vscode` (`npm install && npx vsce package`). It
+also has **Bea: Show Generated Gleam** to see what the current buffer compiles
+to.
 
 **Neovim** (nvim-lspconfig style):
 
@@ -469,6 +508,9 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/gleam_output` | Rewrites Gleam CLI output to Bea locations |
 | `bea/cli` | The `bea` command |
 | `bea/lsp/*` | JSON, JSON-RPC transport, the proxying language server |
+| `bea/lsp/repair` | Makes the buffer being typed compile (placeholder, closing brackets), finds the call around the cursor |
+| `bea/lsp/index` | Public API of the project and its dependencies (parameter names, docs, unimported values), FFI lookup |
+| `bea_signal`, `bea_ffi` | Ctrl+C forwarding, child processes with a watchdog |
 
 ## Development
 
@@ -477,6 +519,7 @@ gleam test                      # unit tests
 gleam build && export PATH=$PWD/scripts:$PATH
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
 python3 test/lsp/test_lsp.py    # language server integration test
+python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
 ```
 
 `beacode/` holds Bea solutions to the Gleam exercism track; `test/fixtures/`

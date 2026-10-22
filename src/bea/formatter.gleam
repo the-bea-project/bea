@@ -915,6 +915,11 @@ fn type_doc(ty: Type) -> Doc {
   t(type_string(ty))
 }
 
+/// A type written the way Bea code writes it, e.g. `fn(Int) -> (a, b)`.
+pub fn type_to_string(ty: Type) -> String {
+  type_string(ty)
+}
+
 fn type_string(ty: Type) -> String {
   case ty {
     ast.NamedType(_, m, name, args) -> {

@@ -38,6 +38,19 @@ pub fn read_stdin() -> String
 @external(erlang, "bea_ffi", "monotonic_ms")
 pub fn monotonic_ms() -> Int
 
+/// If a child program was stopped because Bea received SIGTERM/SIGHUP (the
+/// launcher turns Ctrl+C into SIGTERM), the exit code Bea should use.
+@external(erlang, "bea_ffi", "was_interrupted")
+pub fn was_interrupted() -> Result(Int, Nil)
+
+/// For the language server: its children are helpers, so a SIGTERM stops
+/// Bea right away instead of being forwarded to them.
+@external(erlang, "bea_ffi", "no_foreground")
+pub fn no_foreground() -> Nil
+
+@external(erlang, "bea_ffi", "file_exists")
+pub fn file_exists(path: String) -> Bool
+
 /// Run a program capturing its combined output line by line.
 @external(erlang, "bea_ffi", "run_lines")
 pub fn run_lines(
@@ -49,6 +62,10 @@ pub fn run_lines(
 ) -> #(Int, state)
 
 /// Run a program attached to the terminal. Returns the exit code.
+///
+/// All `run_*` functions forward interrupts to the child and make sure it
+/// (and everything it started) is gone when Bea exits, so a program can
+/// never outlive Bea and reset the terminal behind the shell's back.
 @external(erlang, "bea_ffi", "run_inherit")
 pub fn run_inherit(executable: String, args: List(String), cwd: String) -> Int
 

@@ -16,8 +16,14 @@
 ////   translated back onto the `.bea` source.
 //// - Formatting and document symbols are answered natively from the Bea
 ////   syntax tree.
-//// - Completion while code doesn't parse (e.g. right after `list.`) is
-////   handled by compiling a copy with a placeholder name at the cursor.
+//// - Requests while the code doesn't compile (right after `list.`, inside
+////   an unfinished call, ...) are answered on a repaired copy of the buffer
+////   (see `bea/lsp/repair`): a placeholder name at the cursor, open brackets
+////   closed, the rest of the definition dropped if need be.
+//// - Answers are enriched from an index of the project and its
+////   dependencies (`bea/lsp/index`): parameter names in signature help and
+////   hovers, completions of functions from modules that aren't imported yet
+////   (adding the import), and `@external` functions in `.erl` / `.mjs` files.
 ////
 //// One `gleam lsp` child is started per Bea project (or per folder of loose
 //// `.bea` files).
@@ -26,8 +32,11 @@ import bea/codegen
 import bea/compiler
 import bea/diagnostic.{type Diagnostic}
 import bea/formatter
+import bea/lsp/assist
+import bea/lsp/index
 import bea/lsp/json.{type Json}
 import bea/lsp/position
+import bea/lsp/repair
 import bea/lsp/symbols
 import bea/lsp/transport.{type Port}
 import bea/parser
@@ -40,8 +49,10 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/result
 import gleam/string
+import simplifile
 
 const placeholder = "bea_lsp_hole"
 
@@ -67,6 +78,13 @@ type Child {
     dirty: Bool,
     /// Bea source paths that have Bea diagnostics published.
     errored: List(String),
+    /// Code generation context of the last sync.
+    context: codegen.Context,
+    /// Public values of the dependencies, read on first use.
+    deps_index: Option(index.Index),
+    /// Generated documents currently replaced by a repaired copy in
+    /// `gleam lsp` (their diagnostics are meaningless until restored).
+    patched: List(String),
   )
 }
 
@@ -80,8 +98,11 @@ type Pending {
     map: Option(SourceMap),
     /// Offset of the cursor in the Bea document (for completion).
     cursor: Int,
-    /// Generated module to restore after a placeholder completion.
+    /// Generated module to restore after a request on a repaired copy.
     restore: Option(String),
+    /// Signature help is answered from a hover on the called function
+    /// (`gleam lsp` has no signature while the cursor is on an argument).
+    call: Option(repair.Call),
   )
 }
 
@@ -98,10 +119,15 @@ type State {
     gleam_diagnostics: Dict(String, List(Json)),
     shutting_down: Bool,
     verbose: Bool,
+    /// The client accepts snippets in completions.
+    snippets: Bool,
+    /// Complete functions with `()` and show their signature.
+    call_parens: Bool,
   )
 }
 
 pub fn main() -> Int {
+  system.no_foreground()
   transport.start()
   let verbose = result.is_ok(system.get_env("BEA_LSP_LOG"))
   let state =
@@ -116,6 +142,8 @@ pub fn main() -> Int {
       gleam_diagnostics: dict.new(),
       shutting_down: False,
       verbose: verbose,
+      snippets: False,
+      call_parens: True,
     )
   loop(state)
 }
@@ -278,6 +306,7 @@ fn capabilities() -> Json {
           "triggerCharacters",
           json.Array([json.String("("), json.String(","), json.String(":")]),
         ),
+        #("retriggerCharacters", json.Array([json.String(" ")])),
       ]),
     ),
     #("renameProvider", json.object([#("prepareProvider", json.Bool(True))])),
@@ -300,7 +329,23 @@ fn request(state: State, id: Json, method: String, params: Json) -> State {
           ),
         ]),
       )
-      let state = State(..state, init_params: params)
+      let snippets =
+        json.at(params, [
+          "capabilities", "textDocument", "completion", "completionItem",
+          "snippetSupport",
+        ])
+        == Some(json.Bool(True))
+      let call_parens = case
+        json.at(params, [
+          "initializationOptions",
+          "completion",
+          "callParentheses",
+        ])
+      {
+        Some(json.Bool(False)) -> False
+        _ -> True
+      }
+      let state = State(..state, init_params: params, snippets:, call_parens:)
       // Start Gleam early for the workspace project so the first request
       // doesn't have to wait for it.
       case root_path(params) {
@@ -655,6 +700,9 @@ fn ensure_child(state: State, p: Project) -> #(State, String) {
               cache: cache,
               dirty: False,
               errored: [],
+              context: sync.context,
+              deps_index: None,
+              patched: [],
             )
           #(put_child(state, child), p.build_dir)
         }
@@ -669,7 +717,7 @@ fn reload_config(state: State, config_path: String) -> State {
     project.find(root)
   {
     Ok(child), Ok(p) -> {
-      let child = Child(..child, project: p, dirty: True)
+      let child = Child(..child, project: p, dirty: True, deps_index: None)
       let state = put_child(state, child)
       let gleam_toml = position.path_to_uri(p.build_dir <> "/gleam.toml")
       project.sync_config(p)
@@ -880,7 +928,15 @@ fn refresh(state: State, key: String) -> State {
       list.each(list.append(errored, cleared), publish(state, _))
 
       // Open documents: send the generated code to gleam.
-      let child = Child(..child, modules:, cache:, dirty: False, errored:)
+      let child =
+        Child(
+          ..child,
+          modules:,
+          cache:,
+          dirty: False,
+          errored:,
+          context: sync.context,
+        )
       let open_sources =
         dict.keys(state.docs)
         |> list.filter(fn(p) {
@@ -941,9 +997,20 @@ fn refresh(state: State, key: String) -> State {
 }
 
 fn sync_open(child: Child, gleam_path: String, text: String) -> Child {
+  sync_open_(child, gleam_path, text, False)
+}
+
+/// `force` sends the text even when Gleam has it already, to have the
+/// module checked (and its diagnostics published) again.
+fn sync_open_(
+  child: Child,
+  gleam_path: String,
+  text: String,
+  force: Bool,
+) -> Child {
   let uri = position.path_to_uri(gleam_path)
   case dict.get(child.open, gleam_path) {
-    Ok(#(_, existing)) if existing == text -> child
+    Ok(#(_, existing)) if existing == text && !force -> child
     Ok(#(version, _)) -> {
       let child =
         send(
@@ -1047,6 +1114,10 @@ fn gleam_diagnostics(state: State, child: Child, params: Json) -> State {
         dict.get(child.modules, path),
         project.original_path(child.project, path)
       {
+        // While a repaired copy is open, diagnostics of any module can be
+        // about it (the copy may drop definitions other modules use). The
+        // real ones are published again after the restore.
+        Ok(_), _ if child.patched != [] -> state
         Ok(module), _ -> {
           let mapped =
             diagnostics
@@ -1192,18 +1263,129 @@ fn positional(state: State, id: Json, method: String, params: Json) -> State {
           respond(id, json.Null)
           state
         }
-        Ok(child) ->
-          case string.ends_with(path, ".bea") {
-            True -> positional_bea(state, child, id, method, params, document)
-            False ->
-              positional_passthrough(state, child, id, method, params, path)
+        Ok(child) -> {
+          let child = case method {
+            "textDocument/completion"
+            | "textDocument/signatureHelp"
+            | "textDocument/hover" -> with_deps_index(child)
+            _ -> child
           }
+          let state = put_child(state, child)
+          case foreign(state, child, id, method, params, document) {
+            True -> state
+            False ->
+              case string.ends_with(path, ".bea") {
+                True ->
+                  positional_bea(state, child, id, method, params, document)
+                False ->
+                  positional_passthrough(state, child, id, method, params, path)
+              }
+          }
+        }
       }
     }
     _, _ -> {
       respond(id, json.Null)
       state
     }
+  }
+}
+
+fn with_deps_index(child: Child) -> Child {
+  // Read again while empty: dependencies may not have been downloaded yet.
+  case child.deps_index {
+    Some(i) ->
+      case dict.is_empty(i) {
+        False -> child
+        True ->
+          Child(..child, deps_index: Some(index.dependencies(child.project)))
+      }
+    None -> Child(..child, deps_index: Some(index.dependencies(child.project)))
+  }
+}
+
+/// Go to definition / hover on an `@external(...)`: answered from the Erlang
+/// or JavaScript source, which `gleam lsp` doesn't look into.
+fn foreign(
+  state: State,
+  child: Child,
+  id: Json,
+  method: String,
+  params: Json,
+  document: Document,
+) -> Bool {
+  let _ = state
+  case method {
+    "textDocument/definition" | "textDocument/hover" -> {
+      let index = span.line_index(document.text)
+      let offset = case json.get(params, "position") {
+        Some(p) -> position.to_offset(index, p)
+        None -> 0
+      }
+      let found =
+        assist.external_at(document.text, offset)
+        |> option.then(fn(e) {
+          case e.target {
+            "erlang" -> index.find_erlang(child.project, e.module, e.function)
+            _ ->
+              index.find_javascript(
+                project.dirname(document.path),
+                e.module,
+                e.function,
+              )
+          }
+        })
+      case found, method {
+        None, _ -> False
+        Some(f), "textDocument/definition" -> {
+          let at =
+            json.object([
+              #("line", json.Int(f.line)),
+              #("character", json.Int(0)),
+            ])
+          respond(
+            id,
+            json.object([
+              #("uri", json.String(position.path_to_uri(f.path))),
+              #("range", json.object([#("start", at), #("end", at)])),
+            ]),
+          )
+          True
+        }
+        Some(f), _ -> {
+          respond(
+            id,
+            json.object([
+              #(
+                "contents",
+                json.object([
+                  #("kind", json.String("markdown")),
+                  #(
+                    "value",
+                    json.String(assist.foreign_markdown(
+                      f,
+                      display_path(child, f.path),
+                    )),
+                  ),
+                ]),
+              ),
+            ]),
+          )
+          True
+        }
+      }
+    }
+    _ -> False
+  }
+}
+
+fn display_path(child: Child, path: String) -> String {
+  let root = child.project.root <> "/"
+  let packages = child.project.build_dir <> "/build/packages/"
+  case string.starts_with(path, packages), string.starts_with(path, root) {
+    True, _ -> string.drop_start(path, string.length(packages))
+    _, True -> string.drop_start(path, string.length(root))
+    _, _ -> path
   }
 }
 
@@ -1250,7 +1432,7 @@ fn positional_passthrough(
     id,
     method,
     params,
-    Pending(child.key, method, path, None, 0, None),
+    Pending(child.key, method, path, None, 0, None, None),
   )
 }
 
@@ -1283,13 +1465,132 @@ fn positional_bea(
       <> " up_to_date="
       <> string.inspect(up_to_date),
   )
-  let wants_placeholder =
-    method == "textDocument/completion"
-    && { !up_to_date || !is_name_char(before) }
-  case wants_placeholder, module, up_to_date {
-    True, _, _ ->
-      completion_with_placeholder(state, child, id, params, document, offset)
-    False, Some(m), True ->
+  case method, module, up_to_date {
+    "textDocument/completion", _, _ ->
+      case repair.in_text(document.text, offset) {
+        // Nothing to complete in comments and strings.
+        True -> {
+          respond(id, json.Array([]))
+          state
+        }
+        False ->
+          case up_to_date && is_name_char(before) {
+            True ->
+              forward_at(state, child, id, method, params, document, offset)
+            False ->
+              repaired(
+                state,
+                child,
+                id,
+                method,
+                params,
+                document,
+                offset,
+                offset,
+                placeholder,
+              )
+          }
+      }
+    "textDocument/signatureHelp", _, _ ->
+      case repair.call_at(document.text, offset) {
+        Error(_) -> {
+          respond(id, json.Null)
+          state
+        }
+        Ok(call) -> {
+          let params =
+            json.set(
+              params,
+              "position",
+              position.from_offset(index, call.name_start),
+            )
+          let state = case up_to_date {
+            True ->
+              forward_at(
+                state,
+                child,
+                id,
+                "textDocument/hover",
+                params,
+                document,
+                call.name_start,
+              )
+            False ->
+              repaired(
+                state,
+                child,
+                id,
+                "textDocument/hover",
+                params,
+                document,
+                call.name_start,
+                offset,
+                "",
+              )
+          }
+          // Answer as signature help when the hover comes back.
+          State(
+            ..state,
+            // (Nothing is pending when it was answered `null` already.)
+            pending: case dict.get(state.pending, id_key(id)) {
+              Ok(p) ->
+                dict.insert(
+                  state.pending,
+                  id_key(id),
+                  Pending(
+                    ..p,
+                    method: "textDocument/signatureHelp",
+                    call: Some(call),
+                  ),
+                )
+              Error(_) -> state.pending
+            },
+          )
+        }
+      }
+    "textDocument/hover", _, False
+    | "textDocument/definition", _, False
+    | "textDocument/typeDefinition", _, False
+    ->
+      // Keep the whole name under the cursor, repair after it.
+      repaired(
+        state,
+        child,
+        id,
+        method,
+        params,
+        document,
+        offset,
+        repair.word_end(document.text, offset),
+        "",
+      )
+    _, Some(_), True ->
+      forward_at(state, child, id, method, params, document, offset)
+    // The document doesn't compile right now, so positions can't be trusted.
+    _, _, _ -> {
+      respond(id, json.Null)
+      state
+    }
+  }
+}
+
+/// Forward a request about an up to date document to `gleam lsp`.
+fn forward_at(
+  state: State,
+  child: Child,
+  id: Json,
+  method: String,
+  params: Json,
+  document: Document,
+  offset: Int,
+) -> State {
+  let gleam_path = generated_path(child, document.path)
+  case dict.get(child.modules, gleam_path) {
+    Error(_) -> {
+      respond(id, json.Null)
+      state
+    }
+    Ok(m) ->
       case sourcemap.to_gleam_offset_inclusive(m.map, offset) {
         Some(gleam_offset) -> {
           let params =
@@ -1309,7 +1610,15 @@ fn positional_bea(
             id,
             method,
             params,
-            Pending(child.key, method, document.path, Some(m.map), offset, None),
+            Pending(
+              child.key,
+              method,
+              document.path,
+              Some(m.map),
+              offset,
+              None,
+              None,
+            ),
           )
         }
         None -> {
@@ -1317,11 +1626,6 @@ fn positional_bea(
           state
         }
       }
-    // The document doesn't compile right now, so positions can't be trusted.
-    _, _, _ -> {
-      respond(id, json.Null)
-      state
-    }
   }
 }
 
@@ -1340,38 +1644,52 @@ fn is_name_char(c: String) -> Bool {
   )
 }
 
-/// Complete at a position where the code doesn't currently parse (e.g. just
-/// after `list.`) by compiling a copy with a placeholder name at the cursor.
-fn completion_with_placeholder(
+/// Answer a request on a repaired copy of a document that doesn't compile
+/// as it is (see `bea/lsp/repair`): `hole` is inserted at `at`, and the
+/// request is made at `offset`. The copy is shown to `gleam lsp` for the
+/// duration of the request, then the real generated code is put back.
+fn repaired(
   state: State,
   child: Child,
   id: Json,
+  method: String,
   params: Json,
   document: Document,
   offset: Int,
+  at: Int,
+  hole: String,
 ) -> State {
   let gleam_path = generated_path(child, document.path)
-  let text = document.text
-  let patched =
-    span.text(text, Span(0, offset))
-    <> placeholder
-    <> span.text(text, Span(offset, string.byte_size(text)))
-  log(state, "placeholder patch at " <> int.to_string(offset))
-  case compiler.compile(patched, codegen.empty_context()) {
-    Error(errs) -> {
-      log(state, "placeholder compile failed: " <> string.inspect(errs))
+  let compiled =
+    repair.candidates(document.text, at, hole)
+    |> list.find_map(fn(patched) {
+      compiler.compile(patched, child.context)
+      |> result.map(fn(c) { #(patched, c) })
+      |> result.replace_error(Nil)
+    })
+  case compiled {
+    Error(_) -> {
+      log(state, "no repair compiles for " <> method)
       respond(id, json.Null)
       state
     }
-    Ok(compiled) -> {
+    Ok(#(patched, compiled)) -> {
       let map = sourcemap.new(compiled.mappings, patched, compiled.gleam)
-      case sourcemap.to_gleam_offset(map, offset) {
+      let gleam_offset = case hole {
+        "" -> sourcemap.to_gleam_offset_inclusive(map, offset)
+        _ -> sourcemap.to_gleam_offset(map, offset)
+      }
+      case gleam_offset {
         None -> {
           respond(id, json.Null)
           state
         }
         Some(gleam_offset) -> {
           let child = sync_open(child, gleam_path, compiled.gleam)
+          let child = case list.contains(child.patched, gleam_path) {
+            True -> child
+            False -> Child(..child, patched: [gleam_path, ..child.patched])
+          }
           let params =
             params
             |> json.update_at(["textDocument"], json.set(
@@ -1387,15 +1705,16 @@ fn completion_with_placeholder(
             state,
             child,
             id,
-            "textDocument/completion",
+            method,
             params,
             Pending(
               child.key,
-              "textDocument/completion",
+              method,
               document.path,
               Some(map),
               offset,
               Some(gleam_path),
+              None,
             ),
           )
         }
@@ -1429,16 +1748,29 @@ fn child_response(
           respond(id, result)
         }
       }
-      // Put back the real generated code after a placeholder completion.
+      // Put back the real generated code after a request on a repaired copy.
       case pending.restore {
-        Some(gleam_path) ->
-          case dict.get(child.modules, gleam_path) {
-            Ok(m) -> {
-              let assert Ok(child) = dict.get(state.children, child.key)
-              put_child(state, sync_open(child, gleam_path, m.map.gleam_source))
+        Some(gleam_path) -> {
+          let assert Ok(child) = dict.get(state.children, child.key)
+          let still_pending =
+            dict.values(state.pending)
+            |> list.any(fn(p) { p.restore == Some(gleam_path) })
+          case still_pending, dict.get(child.modules, gleam_path) {
+            True, _ -> state
+            False, Ok(m) -> {
+              let child =
+                sync_open_(child, gleam_path, m.map.gleam_source, True)
+              let patched =
+                list.filter(child.patched, fn(p) { p != gleam_path })
+              put_child(state, Child(..child, patched:))
             }
-            Error(_) -> state
+            False, Error(_) -> {
+              let patched =
+                list.filter(child.patched, fn(p) { p != gleam_path })
+              put_child(state, Child(..child, patched:))
+            }
           }
+        }
         None -> state
       }
     }
@@ -1451,6 +1783,28 @@ fn translate_result(
   pending: Pending,
   result: Json,
 ) -> Json {
+  // Gleam answered on a repaired copy: its positions in that module are
+  // positions in the copy.
+  let child = case pending.restore, pending.map {
+    Some(gleam_path), Some(map) ->
+      Child(
+        ..child,
+        modules: dict.upsert(child.modules, gleam_path, fn(m) {
+          case m {
+            Some(m) -> project.Module(..m, map:)
+            None ->
+              project.Module(
+                project.module_name(child.project, pending.path),
+                pending.path,
+                gleam_path,
+                map.bea_source,
+                map,
+              )
+          }
+        }),
+      )
+    _, _ -> child
+  }
   let map_range = fn(range: Json) {
     case pending.map {
       Some(map) -> map_range_to_bea(map, range)
@@ -1495,10 +1849,16 @@ fn translate_result(
       other -> other
     }
   }
+  let bea = string.ends_with(pending.path, ".bea")
   let result = case pending.method {
-    "textDocument/hover"
-    | "textDocument/completion"
-    | "textDocument/signatureHelp" -> bea_types(result)
+    _ if !bea -> result
+    "textDocument/completion" -> bea_types(result)
+    "textDocument/hover" -> hover(state, child, pending, result)
+    "textDocument/signatureHelp" ->
+      case pending.call {
+        Some(call) -> signature_from_hover(state, child, pending, call, result)
+        None -> signature_help(state, child, pending, result)
+      }
     _ -> result
   }
   case pending.method {
@@ -1544,7 +1904,7 @@ fn translate_result(
         None, None -> result
       }
     "textDocument/rename" -> rename_edit(child, result)
-    "textDocument/completion" -> completion(state, child, pending, result)
+    "textDocument/completion" if bea -> completion(state, child, pending, result)
     _ -> result
   }
 }
@@ -1656,14 +2016,238 @@ fn rename_edit(child: Child, edit: Json) -> Json {
   }
 }
 
-/// Standard library modules Bea imports automatically.
-const auto_imported = [
-  "gleam/list", "gleam/dict", "gleam/set", "gleam/string", "gleam/int",
-  "gleam/float", "gleam/result", "gleam/option", "gleam/io", "gleam/bool",
-  "gleam/order", "gleam/pair", "gleam/function", "gleam/bit_array",
-  "gleam/bytes_tree", "gleam/string_tree", "gleam/dynamic",
-  "gleam/dynamic/decode", "gleam/uri",
-]
+// --- Enriching Gleam's answers ------------------------------------------------------
+
+/// Look up a declaration in the project (Bea and Gleam modules) or its
+/// dependencies.
+fn lookup(child: Child) -> fn(String, String) -> Option(index.Entry) {
+  fn(module, name) {
+    case project_entries(child, module) {
+      Some(entries) ->
+        list.find(entries, fn(e) { e.name == name }) |> option.from_result
+      None ->
+        case child.deps_index {
+          Some(deps) -> index.lookup(deps, module, name)
+          None -> None
+        }
+    }
+  }
+}
+
+/// Public values of one of the project's own modules.
+fn project_entries(child: Child, module: String) -> Option(List(index.Entry)) {
+  let bea = child.project.build_dir <> "/src/" <> module <> ".gleam"
+  case dict.get(child.modules, bea) {
+    Ok(m) -> Some(index.from_bea(module, parser.parse_module(m.source).module))
+    Error(_) -> {
+      let gleam = child.project.src_dir <> "/" <> module <> ".gleam"
+      case system.file_exists(gleam) {
+        False -> None
+        True ->
+          simplifile.read(gleam)
+          |> result.map(index.from_gleam(module, _))
+          |> option.from_result
+      }
+    }
+  }
+}
+
+fn current_module(child: Child, document: Document) -> String {
+  project.module_name(child.project, document.path)
+}
+
+fn hover(state: State, child: Child, pending: Pending, result: Json) -> Json {
+  case dict.get(state.docs, pending.path) {
+    Error(_) -> bea_types(result)
+    Ok(document) -> {
+      let #(qualifier, name, _, _) =
+        repair.qualified_name_at(document.text, pending.cursor)
+      let entry =
+        assist.resolve(
+          assist.imports(document.text),
+          current_module(child, document),
+          qualifier,
+          name,
+          lookup(child),
+        )
+      let rewrite = fn(contents: String) {
+        assist.hover(contents, entry, qualifier)
+      }
+      case json.get(result, "contents") {
+        Some(json.String(c)) ->
+          json.set(result, "contents", json.String(rewrite(c)))
+        Some(json.Object(_) as markup) ->
+          json.set(
+            result,
+            "contents",
+            json.update_at(markup, ["value"], fn(v) {
+              case v {
+                json.String(c) -> json.String(rewrite(c))
+                other -> other
+              }
+            }),
+          )
+        _ -> bea_types(result)
+      }
+    }
+  }
+}
+
+fn signature_help(
+  state: State,
+  child: Child,
+  pending: Pending,
+  result: Json,
+) -> Json {
+  let imports = case dict.get(state.docs, pending.path) {
+    Ok(d) -> Some(#(assist.imports(d.text), current_module(child, d)))
+    Error(_) -> None
+  }
+  case json.get(result, "signatures") {
+    Some(json.Array(signatures)) ->
+      json.set(
+        result,
+        "signatures",
+        json.Array(
+          list.map(signatures, fn(sig) {
+            let entry = case imports {
+              Some(#(imports, module)) -> {
+                let #(qualifier, name) = assist.signature_target(sig)
+                assist.resolve(imports, module, qualifier, name, lookup(child))
+              }
+              None -> None
+            }
+            assist.signature(sig, entry)
+          }),
+        ),
+      )
+    _ -> result
+  }
+}
+
+/// Build signature help from the hover of the called function: its type
+/// (from Gleam), parameter names (from the declaration), its docs, and the
+/// argument the cursor is in (counted in the Bea source).
+fn signature_from_hover(
+  state: State,
+  child: Child,
+  pending: Pending,
+  call: repair.Call,
+  result: Json,
+) -> Json {
+  let contents = case json.get(result, "contents") {
+    Some(json.String(c)) -> c
+    Some(json.Object(_) as markup) ->
+      json.string_at(markup, ["value"]) |> option.unwrap("")
+    _ -> ""
+  }
+  let #(code, docs) = case string.split_once(contents, "```gleam\n") {
+    Ok(#(_, after)) ->
+      case string.split_once(after, "\n```") {
+        Ok(#(code, docs)) -> #(code, string.trim(docs))
+        Error(_) -> #(after, "")
+      }
+    Error(_) -> #("", "")
+  }
+  case assist.fn_type(assist.bea_type(code)) {
+    None -> json.Null
+    Some(#(types, ret)) -> {
+      let entry = case dict.get(state.docs, pending.path) {
+        Ok(d) ->
+          assist.resolve(
+            assist.imports(d.text),
+            current_module(child, d),
+            call.qualifier,
+            call.name,
+            lookup(child),
+          )
+        Error(_) -> None
+      }
+      let declared = case entry {
+        Some(e) -> e.params
+        None -> []
+      }
+      let shown =
+        list.index_map(types, fn(t, i) {
+          case list.drop(declared, i) {
+            [d, ..] -> index.param_string(index.Param(d.label, d.name, t))
+            [] -> t
+          }
+        })
+      let active = case call.label {
+        Ok(l) ->
+          declared
+          |> list.index_map(fn(d, i) { #(d, i) })
+          |> list.find(fn(d) { d.0.label == Some(l) || d.0.name == l })
+          |> result.map(fn(d) { d.1 })
+          |> result.unwrap(call.argument)
+        Error(_) -> call.argument
+      }
+      let name = case call.qualifier {
+        Ok(q) -> q <> "." <> call.name
+        Error(_) -> call.name
+      }
+      let head = name <> "("
+      let #(parameters, _) =
+        list.fold(shown, #([], span.utf16_length(head)), fn(acc, p) {
+          let #(items, at) = acc
+          let end = at + span.utf16_length(p)
+          #(
+            [
+              json.object([
+                #("label", json.Array([json.Int(at), json.Int(end)])),
+              ]),
+              ..items
+            ],
+            end + 2,
+          )
+        })
+      let label =
+        head
+        <> string.join(shown, ", ")
+        <> ")"
+        <> case ret {
+          "" -> ""
+          r -> " -> " <> r
+        }
+      let documentation = case docs, entry {
+        "", Some(e) -> e.doc
+        d, _ -> d
+      }
+      json.object([
+        #(
+          "signatures",
+          json.Array([
+            json.object([
+              #("label", json.String(label)),
+              #(
+                "documentation",
+                json.object([
+                  #("kind", json.String("markdown")),
+                  #("value", json.String(documentation)),
+                ]),
+              ),
+              #("parameters", json.Array(list.reverse(parameters))),
+              #("activeParameter", json.Int(active)),
+            ]),
+          ]),
+        ),
+        #("activeSignature", json.Int(0)),
+        #("activeParameter", json.Int(active)),
+      ])
+    }
+  }
+}
+
+// --- Completion ---------------------------------------------------------------------
+
+const kind_function = 3
+
+const kind_constructor = 4
+
+const kind_variable = 6
+
+const kind_constant = 21
 
 fn completion(
   state: State,
@@ -1671,61 +2255,110 @@ fn completion(
   pending: Pending,
   result: Json,
 ) -> Json {
-  let _ = child
-  let document = dict.get(state.docs, pending.path)
-  let bea_index = case document {
-    Ok(d) -> span.line_index(d.text)
-    Error(_) -> span.line_index("")
+  let #(text, bea_index, import_offset) = case
+    dict.get(state.docs, pending.path)
+  {
+    Ok(d) -> #(d.text, span.line_index(d.text), import_insertion_offset(d.text))
+    Error(_) -> #("", span.line_index(""), 0)
   }
-  let import_offset = case document {
-    Ok(d) -> import_insertion_offset(d.text)
-    Error(_) -> 0
+  let cursor = pending.cursor
+  // The name being typed, and the module qualifier before it (`timestamp.`).
+  let word = repair.word_start(text, cursor)
+  let qualified = case repair.char_before(text, word) {
+    "." -> repair.word_start(text, word - 1)
+    _ -> word
   }
-  let fix_range = fn(range: Json) -> Option(Json) {
-    case pending.map {
-      None -> Some(range)
-      Some(map) -> {
-        let generated = position.range_to_span(map.gleam, range)
-        let start = sourcemap.to_bea_offset(map, generated.start)
-        let start = case start {
-          Some(s) -> Some(int.min(s, pending.cursor))
-          None ->
-            case generated.start == generated.end {
-              True -> Some(pending.cursor)
-              False -> None
-            }
+  let line = repair.line_before(text, cursor)
+  let in_import = string.starts_with(line, "import ")
+  // `import gleam/ti|` completes the whole module path.
+  let path_start = cursor - string.byte_size(string.drop_start(line, 7))
+  let range_for = fn(new_text: String) {
+    let start = case in_import, string.contains(new_text, ".") {
+      True, _ ->
+        case string.contains(new_text, "/") || !string.contains(line, ".{") {
+          True -> int.max(path_start, 0)
+          False -> word
         }
-        case start {
-          Some(s) ->
-            Some(position.span_to_range(bea_index, Span(s, pending.cursor)))
-          None -> None
+      False, True -> qualified
+      False, False -> word
+    }
+    position.span_to_range(bea_index, Span(start, cursor))
+  }
+  let next = repair.char_at(text, repair.word_end(text, cursor))
+  let piped =
+    string.ends_with(string.trim_end(repair.slice(text, 0, qualified)), "|>")
+  let import_edit = fn(module: String) {
+    json.object([
+      #(
+        "range",
+        position.span_to_range(bea_index, Span(import_offset, import_offset)),
+      ),
+      #("newText", json.String("import " <> module <> "\n")),
+    ])
+  }
+  // `name()` / `name($0)` and the signature popping up, for calls.
+  let callable = fn(item: Json, new_text: String) -> Json {
+    let kind = json.int_at(item, ["kind"]) |> option.unwrap(0)
+    let detail = json.string_at(item, ["detail"]) |> option.unwrap("")
+    let arity = assist.arity(detail)
+    case
+      state.snippets && state.call_parens && !in_import && next != "(",
+      kind == kind_function || kind == kind_constructor,
+      arity
+    {
+      True, True, Some(n) if !{ piped && n <= 1 } -> {
+        let piped_args = case piped {
+          True -> n - 1
+          False -> n
+        }
+        let snippet = case piped_args {
+          0 -> new_text <> "()"
+          _ -> new_text <> "($0)"
+        }
+        let item =
+          item
+          |> json.set("insertTextFormat", json.Int(2))
+          |> json.set(
+            "textEdit",
+            json.object([
+              #("range", range_for(new_text)),
+              #("newText", json.String(snippet)),
+            ]),
+          )
+        case piped_args {
+          0 -> item
+          _ ->
+            json.set(
+              item,
+              "command",
+              json.object([
+                #("title", json.String("Signature help")),
+                #("command", json.String("editor.action.triggerParameterHints")),
+              ]),
+            )
         }
       }
+      _, _, _ -> item
     }
   }
   let fix_item = fn(item: Json) -> Json {
-    let item = case json.get(item, "textEdit") {
-      Some(edit) ->
-        case json.get(edit, "range"), json.get(edit, "insert") {
-          Some(range), _ ->
-            case fix_range(range) {
-              Some(r) -> json.set(item, "textEdit", json.set(edit, "range", r))
-              None -> drop_field(item, "textEdit")
-            }
-          None, Some(insert) ->
-            case fix_range(insert) {
-              Some(r) ->
-                json.set(
-                  item,
-                  "textEdit",
-                  edit |> json.set("insert", r) |> json.set("replace", r),
-                )
-              None -> drop_field(item, "textEdit")
-            }
-          None, None -> item
-        }
-      None -> item
-    }
+    let label = json.string_at(item, ["label"]) |> option.unwrap("")
+    let new_text =
+      json.string_at(item, ["textEdit", "newText"])
+      |> option.lazy_unwrap(fn() {
+        json.string_at(item, ["insertText"]) |> option.unwrap(label)
+      })
+    let item =
+      item
+      |> drop_field("insertText")
+      |> json.set(
+        "textEdit",
+        json.object([
+          #("range", range_for(new_text)),
+          #("newText", json.String(new_text)),
+        ]),
+      )
+    let item = callable(item, new_text)
     case json.get(item, "additionalTextEdits") {
       Some(json.Array(edits)) ->
         json.set(
@@ -1743,21 +2376,10 @@ fn completion(
                     |> string.split(".")
                     |> list.first
                     |> result.unwrap("")
-                  case list.contains(auto_imported, string.trim(module)) {
+                    |> string.trim
+                  case list.contains(assist.auto_imported, module) {
                     True -> Error(Nil)
-                    False ->
-                      Ok(
-                        json.object([
-                          #(
-                            "range",
-                            position.span_to_range(
-                              bea_index,
-                              Span(import_offset, import_offset),
-                            ),
-                          ),
-                          #("newText", json.String(string.trim(text) <> "\n")),
-                        ]),
-                      )
+                    False -> Ok(import_edit(module))
                   }
                 }
               }
@@ -1767,29 +2389,179 @@ fn completion(
       _ -> item
     }
   }
-  let not_placeholder = fn(item: Json) {
-    !string.contains(
-      json.string_at(item, ["label"]) |> option.unwrap(""),
-      placeholder,
-    )
+  // Names that only exist in the generated Gleam.
+  let wanted = fn(item: Json) {
+    let label = json.string_at(item, ["label"]) |> option.unwrap("")
+    let kind = json.int_at(item, ["kind"]) |> option.unwrap(0)
+    !string.contains(label, placeholder)
+    && !string.starts_with(label, "bea_")
+    && !string.contains(label, ".bea_")
+    && !{
+      kind == kind_variable
+      && string.starts_with(label, "arg_")
+      && !string.contains(text, label)
+    }
   }
-  case result {
-    json.Array(items) ->
-      json.Array(items |> list.filter(not_placeholder) |> list.map(fix_item))
+  let gleam_items = case result {
+    json.Array(items) -> items
     json.Object(_) ->
       case json.get(result, "items") {
-        Some(json.Array(items)) ->
-          json.set(
-            result,
-            "items",
-            json.Array(
-              items |> list.filter(not_placeholder) |> list.map(fix_item),
-            ),
-          )
-        _ -> result
+        Some(json.Array(items)) -> items
+        _ -> []
       }
-    other -> other
+    _ -> []
   }
+  let items =
+    gleam_items
+    |> list.filter(wanted)
+    |> list.map(bea_types)
+    |> list.map(fix_item)
+  // Values from modules that aren't imported yet, for a bare name.
+  let prefix = repair.slice(text, word, cursor)
+  let #(extra, truncated) = case
+    prefix != "" && word == qualified && !in_import
+  {
+    False -> #([], False)
+    True -> {
+      let offered =
+        list.filter_map(items, fn(i) {
+          json.string_at(i, ["textEdit", "newText"]) |> option.to_result(Nil)
+        })
+      unimported(child, text, pending.path, prefix, offered)
+    }
+  }
+  let extra =
+    list.map(extra, fn(e) {
+      let #(entry, qualifier, sort) = e
+      let new_text = qualifier <> "." <> entry.name
+      let kind = case entry.kind {
+        index.Function -> kind_function
+        index.Constructor -> kind_constructor
+        index.Constant -> kind_constant
+      }
+      let detail = case entry.kind {
+        index.Function ->
+          "fn("
+          <> string.join(list.map(entry.params, index.param_string), ", ")
+          <> ")"
+          <> case entry.return_type {
+            "" -> ""
+            r -> " -> " <> r
+          }
+        index.Constructor -> index.signature(entry, None)
+        index.Constant -> entry.return_type
+      }
+      let edits = case list.contains(assist.auto_imported, entry.module) {
+        True -> []
+        False -> [import_edit(entry.module)]
+      }
+      json.object([
+        #("label", json.String(entry.name)),
+        #("kind", json.Int(kind)),
+        #("detail", json.String(assist.bea_type(detail))),
+        #(
+          "labelDetails",
+          json.object([#("description", json.String(entry.module))]),
+        ),
+        #(
+          "documentation",
+          json.object([
+            #("kind", json.String("markdown")),
+            #(
+              "value",
+              json.String(
+                "```bea\n"
+                <> assist.bea_type(index.signature(entry, Some(qualifier)))
+                <> "\n```\n"
+                <> entry.doc
+                <> case edits {
+                  [] -> ""
+                  _ -> "\n\n*Adds `import " <> entry.module <> "`*"
+                },
+              ),
+            ),
+          ]),
+        ),
+        #("sortText", json.String(sort <> entry.name)),
+        #("filterText", json.String(entry.name)),
+        #(
+          "textEdit",
+          json.object([
+            #("range", range_for(new_text)),
+            #("newText", json.String(new_text)),
+          ]),
+        ),
+        #("additionalTextEdits", json.Array(edits)),
+      ])
+      |> callable(new_text)
+    })
+  json.object([
+    #("isIncomplete", json.Bool(truncated)),
+    #("items", json.Array(list.append(items, extra))),
+  ])
+}
+
+const max_unimported = 60
+
+/// Public values of project modules and dependencies that the document
+/// doesn't import, whose name matches what is being typed:
+/// #(entry, qualifier to write, sort prefix), and whether some were left out.
+fn unimported(
+  child: Child,
+  text: String,
+  path: String,
+  prefix: String,
+  offered: List(String),
+) -> #(List(#(index.Entry, String, String)), Bool) {
+  let imports = assist.imports(text)
+  let imported = dict.values(imports.modules)
+  let this = project.module_name(child.project, path)
+  let matches = fn(name: String) {
+    string.starts_with(name, prefix)
+    || { string.length(prefix) >= 3 && string.contains(name, prefix) }
+  }
+  let bea_modules =
+    dict.values(child.modules)
+    |> list.map(fn(m) { #(m.name, parser.parse_module(m.source).module) })
+  let own = index.project_modules(child.project, bea_modules)
+  let candidates = fn(i: index.Index, sort: String) {
+    dict.to_list(i)
+    |> list.filter(fn(m) { m.0 != this && !list.contains(imported, m.0) })
+    |> list.flat_map(fn(m) {
+      let qualifier = assist.last_segment(m.0)
+      // A different module is imported under that name already, or the name
+      // is one of the standard library modules Bea imports by itself.
+      let taken =
+        dict.has_key(imports.modules, qualifier)
+        || list.any(assist.auto_imported, fn(std) {
+          std != m.0 && assist.last_segment(std) == qualifier
+        })
+      case taken {
+        True -> []
+        False ->
+          m.1
+          |> list.filter(fn(e) {
+            matches(e.name)
+            && !list.contains(offered, qualifier <> "." <> e.name)
+          })
+          |> list.map(fn(e) { #(e, qualifier, sort) })
+      }
+    })
+  }
+  let deps = case child.deps_index {
+    Some(d) -> candidates(d, "7_")
+    None -> []
+  }
+  let all =
+    list.append(candidates(own, "6_"), deps)
+    |> list.sort(fn(a, b) {
+      case string.compare(a.2, b.2) {
+        order.Eq ->
+          int.compare(string.length(a.0.name), string.length(b.0.name))
+        other -> other
+      }
+    })
+  #(list.take(all, max_unimported), list.length(all) > max_unimported)
 }
 
 fn drop_field(j: Json, key: String) -> Json {

@@ -1,0 +1,422 @@
+//// Editor assistance on top of what `gleam lsp` answers: resolving names to
+//// their declarations through a Bea module's imports, signature labels with
+//// parameter names, Bea style hovers, and `@external` targets.
+
+import bea/ast
+import bea/lsp/index.{type Entry}
+import bea/lsp/json.{type Json}
+import bea/lsp/text
+import bea/parser
+import bea/span
+import gleam/dict.{type Dict}
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/regexp
+import gleam/result
+import gleam/string
+
+/// Standard library modules Bea imports automatically when they are used.
+pub const auto_imported = [
+  "gleam/list", "gleam/dict", "gleam/set", "gleam/string", "gleam/int",
+  "gleam/float", "gleam/result", "gleam/option", "gleam/io", "gleam/bool",
+  "gleam/order", "gleam/pair", "gleam/function", "gleam/bit_array",
+  "gleam/bytes_tree", "gleam/string_tree", "gleam/dynamic",
+  "gleam/dynamic/decode", "gleam/uri",
+]
+
+pub fn last_segment(module: String) -> String {
+  string.split(module, "/") |> list.last |> result.unwrap(module)
+}
+
+// --- Imports --------------------------------------------------------------------------
+
+pub type Imports {
+  Imports(
+    /// Name used in code (`timestamp`, or the alias) -> module path.
+    modules: Dict(String, String),
+    /// Unqualified value imports -> module path.
+    values: Dict(String, String),
+    /// The module's own syntax tree (possibly partial while it is edited).
+    module: ast.Module,
+  )
+}
+
+/// What a Bea document imports. Works on code that doesn't parse: the items
+/// before the error are still there.
+pub fn imports(source: String) -> Imports {
+  let parsed = parser.parse_module(source).module
+  let #(modules, values) =
+    list.fold(parsed.items, #(dict.new(), dict.new()), fn(acc, item) {
+      case item {
+        ast.Import(module:, alias:, unqualified:, ..) -> {
+          let name = case alias {
+            Some(#(a, _)) -> a
+            None -> last_segment(module)
+          }
+          let values =
+            list.fold(unqualified, acc.1, fn(values, u) {
+              case u.is_type {
+                True -> values
+                False ->
+                  dict.insert(values, option.unwrap(u.alias, u.name), module)
+              }
+            })
+          #(dict.insert(acc.0, name, module), values)
+        }
+        _ -> acc
+      }
+    })
+  Imports(modules, values, parsed)
+}
+
+/// The module a qualifier refers to: an import, or an automatically imported
+/// standard library module.
+pub fn module_for(imports: Imports, qualifier: String) -> Option(String) {
+  case dict.get(imports.modules, qualifier) {
+    Ok(m) -> Some(m)
+    Error(_) ->
+      list.find(auto_imported, fn(m) { last_segment(m) == qualifier })
+      |> option.from_result
+  }
+}
+
+/// Find the declaration a (possibly qualified) name refers to.
+pub fn resolve(
+  imports: Imports,
+  current_module: String,
+  qualifier: Result(String, Nil),
+  name: String,
+  lookup: fn(String, String) -> Option(Entry),
+) -> Option(Entry) {
+  case qualifier {
+    Ok(q) -> module_for(imports, q) |> option.then(lookup(_, name))
+    Error(_) ->
+      case
+        index.from_bea(current_module, imports.module)
+        |> list.find(fn(e) { e.name == name })
+      {
+        Ok(e) -> Some(e)
+        Error(_) ->
+          case dict.get(imports.values, name) {
+            Ok(m) -> lookup(m, name)
+            Error(_) -> local_function(imports.module, current_module, name)
+          }
+      }
+  }
+}
+
+/// Private functions of the module itself are not in the index.
+fn local_function(
+  module: ast.Module,
+  module_name: String,
+  name: String,
+) -> Option(Entry) {
+  list.find_map(module.items, fn(item) {
+    case item {
+      ast.Function(name: n, clauses: [first, ..rest], ..) if n == name -> {
+        let public =
+          ast.Function(..item, clauses: [
+            ast.Clause(..first, publicity: ast.Public),
+            ..rest
+          ])
+        index.from_bea(module_name, ast.Module([public], []))
+        |> list.first
+      }
+      _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+// --- Types in Gleam's answers ------------------------------------------------------------
+
+/// Gleam writes tuple types as `#(A, B)`; Bea writes `(A, B)`.
+pub fn bea_type(s: String) -> String {
+  string.replace(s, "#(", "(")
+}
+
+/// `fn(A, B) -> C` -> #([A, B], C)
+pub fn fn_type(s: String) -> Option(#(List(String), String)) {
+  case string.trim(s) {
+    "fn(" <> rest -> {
+      let #(inside, tail) = text.split_at_close(rest)
+      let params =
+        text.split_top_level(inside, ",")
+        |> list.map(string.trim)
+        |> list.filter(fn(p) { p != "" })
+      case string.trim(tail) {
+        "->" <> ret -> Some(#(params, string.trim(ret)))
+        _ -> Some(#(params, ""))
+      }
+    }
+    _ -> None
+  }
+}
+
+/// Number of parameters of a function type, if it is one.
+pub fn arity(detail: String) -> Option(Int) {
+  fn_type(detail) |> option.map(fn(t) { list.length(t.0) })
+}
+
+fn utf16(s: String) -> Int {
+  span.utf16_length(s)
+}
+
+// --- Signature help -----------------------------------------------------------------------
+
+/// Rewrite one `SignatureInformation` from Gleam: parameter names (from the
+/// declaration) in the label, Bea's tuple syntax, and parameter offsets that
+/// still point at the right parts of the rewritten label.
+pub fn signature(sig: Json, entry: Option(Entry)) -> Json {
+  let label = json.string_at(sig, ["label"]) |> option.unwrap("")
+  case string.split_once(label, "(") {
+    Error(_) -> json.set(sig, "label", json.String(bea_type(label)))
+    Ok(#(head, after)) -> {
+      let #(inside, tail) = text.split_at_close(after)
+      let gleam_params = case json.get(sig, "parameters") {
+        Some(json.Array(ps)) ->
+          list.map(ps, fn(p) {
+            case json.get(p, "label") {
+              Some(json.Array([json.Int(from), json.Int(to)])) ->
+                utf16_slice(label, from, to)
+              Some(json.String(s)) -> s
+              _ -> ""
+            }
+          })
+        _ ->
+          text.split_top_level(inside, ",")
+          |> list.map(string.trim)
+          |> list.filter(fn(p) { p != "" })
+      }
+      let declared = case entry {
+        Some(e) if e.kind != index.Constant -> e.params
+        _ -> []
+      }
+      let shown =
+        list.index_map(gleam_params, fn(p, i) {
+          let p = bea_type(p)
+          case list.drop(declared, i) {
+            [d, ..] -> {
+              // Gleam's own text is `Type` or `label: Type`.
+              let type_ = case text.split_top_level(p, ":") {
+                [_, t, ..] -> string.trim(t)
+                _ -> p
+              }
+              index.param_string(index.Param(d.label, d.name, type_))
+            }
+            [] -> p
+          }
+        })
+      let head = bea_type(head) <> "("
+      let #(parameters, _) =
+        list.fold(shown, #([], utf16(head)), fn(acc, p) {
+          let #(items, at) = acc
+          let end = at + utf16(p)
+          #(
+            [
+              json.object([
+                #("label", json.Array([json.Int(at), json.Int(end)])),
+              ]),
+              ..items
+            ],
+            end + 2,
+          )
+        })
+      let new_label = head <> string.join(shown, ", ") <> ")" <> bea_type(tail)
+      let sig =
+        sig
+        |> json.set("label", json.String(new_label))
+        |> json.set("parameters", json.Array(list.reverse(parameters)))
+      case json.get(sig, "documentation"), entry {
+        None, Some(e) if e.doc != "" ->
+          json.set(
+            sig,
+            "documentation",
+            json.object([
+              #("kind", json.String("markdown")),
+              #("value", json.String(e.doc)),
+            ]),
+          )
+        _, _ -> sig
+      }
+    }
+  }
+}
+
+/// Substring by UTF-16 offsets (the unit LSP uses for label offsets).
+fn utf16_slice(s: String, from: Int, to: Int) -> String {
+  let #(_, out) =
+    string.to_graphemes(s)
+    |> list.fold(#(0, []), fn(acc, g) {
+      let #(at, out) = acc
+      let next = at + utf16(g)
+      case at >= from && next <= to {
+        True -> #(next, [g, ..out])
+        False -> #(next, out)
+      }
+    })
+  out |> list.reverse |> string.concat
+}
+
+/// The function a signature label is about: `timestamp.add(...)` ->
+/// #(Ok("timestamp"), "add").
+pub fn signature_target(sig: Json) -> #(Result(String, Nil), String) {
+  let label = json.string_at(sig, ["label"]) |> option.unwrap("")
+  let head = case string.split_once(label, "(") {
+    Ok(#(h, _)) -> h
+    Error(_) -> label
+  }
+  case string.split(head, ".") |> list.reverse {
+    [name, q, ..] -> #(Ok(q), name)
+    [name] -> #(Error(Nil), name)
+    [] -> #(Error(Nil), "")
+  }
+}
+
+// --- Hover -----------------------------------------------------------------------------------
+
+/// Bea flavoured hover text: the declaration with its parameter names (and
+/// the module it comes from) instead of a bare `fn(A) -> B` type.
+pub fn hover(
+  contents: String,
+  entry: Option(Entry),
+  qualifier: Result(String, Nil),
+) -> String {
+  case string.split_once(contents, "```gleam\n") {
+    Error(_) -> bea_type(contents)
+    Ok(#(before, after)) -> {
+      let #(code, rest) = case string.split_once(after, "\n```") {
+        Ok(parts) -> parts
+        Error(_) -> #(after, "")
+      }
+      let code = bea_type(code)
+      let header = case entry, fn_type(code) {
+        Some(e), Some(#(types, ret)) if e.kind != index.Constant -> {
+          let params =
+            list.index_map(types, fn(t, i) {
+              case list.drop(e.params, i) {
+                [d, ..] -> index.param_string(index.Param(d.label, d.name, t))
+                [] -> t
+              }
+            })
+          let name = case qualifier {
+            Ok(q) -> q <> "." <> e.name
+            Error(_) -> e.name
+          }
+          let ret = case e.kind, ret {
+            index.Constructor, _ | _, "" -> ""
+            _, r -> " -> " <> r
+          }
+          "// "
+          <> e.module
+          <> "\n"
+          <> name
+          <> "("
+          <> string.join(params, ", ")
+          <> ")"
+          <> ret
+        }
+        Some(e), _ -> "// " <> e.module <> "\n" <> code
+        None, _ -> code
+      }
+      before <> "```bea\n" <> header <> "\n```" <> bea_type(rest)
+    }
+  }
+}
+
+// --- @external ----------------------------------------------------------------------------------
+
+pub type External {
+  External(target: String, module: String, function: String)
+}
+
+/// The `@external` on the cursor's line, or on the attribute lines right
+/// above a declaration the cursor is on.
+pub fn external_at(source: String, offset: Int) -> Option(External) {
+  let lines = string.split(source, "\n")
+  let #(line_no, line_start) =
+    list.fold_until(lines, #(0, 0), fn(acc, line) {
+      let #(n, start) = acc
+      let end = start + string.byte_size(line) + 1
+      case offset < end {
+        True -> list.Stop(#(n, start))
+        False -> list.Continue(#(n + 1, end))
+      }
+    })
+  let current = list.drop(lines, line_no) |> list.first |> result.unwrap("")
+  case parse_external(current) {
+    Some(e) -> Some(e)
+    None ->
+      // On a declaration, only its name leads to the foreign function (a
+      // parameter's type should still go to the type).
+      case
+        is_declaration(current)
+        && on_declared_name(current, offset - line_start)
+      {
+        False -> None
+        True ->
+          list.take(lines, line_no)
+          |> list.reverse
+          |> list.take_while(fn(l) { string.starts_with(string.trim(l), "@") })
+          |> list.reverse
+          |> list.find_map(fn(l) { parse_external(l) |> option.to_result(Nil) })
+          |> option.from_result
+      }
+  }
+}
+
+fn on_declared_name(line: String, column: Int) -> Bool {
+  let rest =
+    ["pub def ", "def ", "pub fn ", "fn "]
+    |> list.find_map(fn(keyword) {
+      case string.split_once(line, keyword) {
+        Ok(#(before, after)) ->
+          case string.trim(before) {
+            "" ->
+              Ok(#(string.byte_size(before) + string.byte_size(keyword), after))
+            _ -> Error(Nil)
+          }
+        Error(_) -> Error(Nil)
+      }
+    })
+  case rest {
+    Ok(#(start, after)) -> {
+      let name_length = case string.split_once(after, "(") {
+        Ok(#(name, _)) -> string.byte_size(string.trim_end(name))
+        Error(_) -> string.byte_size(string.trim_end(after))
+      }
+      column >= start && column <= start + name_length
+    }
+    Error(_) -> False
+  }
+}
+
+fn is_declaration(line: String) -> Bool {
+  let t = string.trim(line)
+  list.any(["def ", "pub def ", "fn ", "pub fn "], string.starts_with(t, _))
+}
+
+fn parse_external(line: String) -> Option(External) {
+  let assert Ok(re) =
+    regexp.from_string(
+      "@external\\(\\s*(erlang|javascript)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]+)\"\\s*\\)",
+    )
+  case regexp.scan(re, line) {
+    [regexp.Match(submatches: [Some(t), Some(m), Some(f)], ..), ..] ->
+      Some(External(t, m, f))
+    _ -> None
+  }
+}
+
+/// Markdown for an FFI function's source.
+pub fn foreign_markdown(f: index.Foreign, display_path: String) -> String {
+  "```"
+  <> f.language
+  <> "\n"
+  <> f.snippet
+  <> "\n```\n\n"
+  <> display_path
+  <> ":"
+  <> int.to_string(f.line + 1)
+}

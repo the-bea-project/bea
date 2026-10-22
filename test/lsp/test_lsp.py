@@ -67,6 +67,33 @@ pub def pair() -> (Int, String) {
         )
     with open(os.path.join(project, "src", "app", "helper.gleam"), "w") as f:
         f.write("pub fn twice(x: Int) -> Int {\n  x * 2\n}\n")
+    # Not imported by app.bea: completions should offer it and add the import.
+    with open(os.path.join(project, "src", "app", "words.bea"), "w") as f:
+        f.write(
+            """/// Shouts a word.
+pub def shout(word: String, times count: Int) -> String {
+  string.repeat(string.uppercase(word), count)
+}
+"""
+        )
+    # FFI
+    with open(os.path.join(project, "src", "app", "native.bea"), "w") as f:
+        f.write(
+            """@external(erlang, "app_native_ffi", "double")
+pub def double(x: Int) -> Int
+"""
+        )
+    with open(os.path.join(project, "src", "app_native_ffi.erl"), "w") as f:
+        f.write(
+            """-module(app_native_ffi).
+-export([double/1]).
+
+%% Doubles a number, natively.
+-spec double(integer()) -> integer().
+double(X) ->
+    X * 2.
+"""
+        )
     return project
 
 
@@ -99,7 +126,7 @@ pub def main() {
     pos = position_of(text, "maths.square", 7)
     hover = client.request("textDocument/hover", {"textDocument": {"uri": doc["uri"]}, "position": pos})
     contents = json.dumps(hover)
-    check("hover shows the function type", "fn(Int) -> Int" in contents, contents)
+    check("hover shows the signature with parameter names", "maths.square(x: Int) -> Int" in contents, contents)
     check("hover includes doc comment from Bea", "Squares a number" in contents, contents)
     if hover and "range" in hover:
         r = hover["range"]
@@ -246,6 +273,92 @@ pub def main() {
     hpos = position_of(maths_text, "w *. h", 0)
     hover = client.request("textDocument/hover", {"textDocument": {"uri": maths_doc["uri"]}, "position": hpos})
     check("hover inside clause body", "Float" in json.dumps(hover), json.dumps(hover))
+
+    # --- Completion and signature help while typing ---------------------------------
+    def edit(new_text, version):
+        client.notify(
+            "textDocument/didChange",
+            {"textDocument": {"uri": doc["uri"], "version": version}, "contentChanges": [{"text": new_text}]},
+        )
+
+    def complete(new_text, needle, version, offset=None):
+        edit(new_text, version)
+        p = position_of(new_text, needle, len(needle) if offset is None else offset)
+        res = client.request("textDocument/completion", {"textDocument": {"uri": doc["uri"]}, "position": p})
+        return p, (res["items"] if isinstance(res, dict) else (res or []))
+
+    def signature(new_text, needle, version):
+        edit(new_text, version)
+        p = position_of(new_text, needle, len(needle))
+        return client.request("textDocument/signatureHelp", {"textDocument": {"uri": doc["uri"]}, "position": p})
+
+    # Inside an unfinished call (nothing after the cursor closes it).
+    typing = text.replace("n = maths.square(4)", "n = int.add(maths.")
+    p, items = complete(typing, "int.add(maths.", 20)
+    labels = [i["label"] for i in items]
+    check("completion inside an unfinished call", any("square" in l for l in labels), json.dumps(labels[:20]))
+
+    # Every edit range is on the cursor's line and ends at the cursor.
+    p, items = complete(text, "maths.area(sha", 21)
+    bad = [
+        i for i in items
+        if i.get("textEdit")
+        and not (i["textEdit"]["range"]["start"]["line"] == p["line"] == i["textEdit"]["range"]["end"]["line"]
+                 and i["textEdit"]["range"]["end"]["character"] == p["character"])
+    ]
+    check("completion ranges end at the cursor on its line", not bad, json.dumps(bad[:2]))
+
+    # Values of a module that isn't imported, with the import added.
+    unimported = text.replace("n = maths.square(4)", "n = sho")
+    p, items = complete(unimported, "n = sho", 22)
+    shout = [i for i in items if i["label"] == "shout"]
+    check("completion offers functions of modules that aren't imported", bool(shout), json.dumps([i["label"] for i in items][:30]))
+    if shout:
+        item = shout[0]
+        check("unimported completion inserts the qualified name", item["textEdit"]["newText"].startswith("words.shout"), json.dumps(item))
+        edits = json.dumps(item.get("additionalTextEdits"))
+        check("unimported completion adds the import", "import app/words" in edits, edits)
+        check("unimported completion has docs", "Shouts a word" in json.dumps(item.get("documentation")), json.dumps(item))
+
+    # Nothing to complete in comments.
+    commented = text.replace("n = maths.square(4)", "// maths.\n  n = maths.square(4)")
+    p, items = complete(commented, "// maths.", 23)
+    check("no completion in comments", items == [], json.dumps(items[:3]))
+
+    # Signature help with parameter names, while the call is unfinished.
+    sig = signature(text.replace("n = maths.square(4)", "n = maths.square("), "maths.square(", 24)
+    label = sig and sig["signatures"][0]["label"]
+    check("signature help in an unfinished call", label == "maths.square(x: Int) -> Int", json.dumps(sig))
+
+    # The argument being typed is tracked, labels included.
+    two = text.replace("n = maths.square(4)", 'n = words.shout("a", ').replace("import app/maths.{Circle}", "import app/maths.{Circle}\nimport app/words")
+    sig = signature(two, 'words.shout("a", ', 25)
+    check("signature help tracks the second argument", sig and sig["activeParameter"] == 1, json.dumps(sig))
+    if sig:
+        s0 = sig["signatures"][0]
+        names = [s0["label"][a:b] for a, b in (x["label"] for x in s0["parameters"])]
+        check("signature help shows names and labels", names == ["word: String", "times count: Int"], json.dumps(names))
+    sig = signature(text.replace("n = maths.square(4)", 'n = words.shout(times: ').replace("import app/maths.{Circle}", "import app/maths.{Circle}\nimport app/words"), "words.shout(times: ", 26)
+    check("signature help follows a labelled argument", sig and sig["activeParameter"] == 1, json.dumps(sig))
+    sig = signature(text.replace("n = maths.square(4)", 'n = maths.square(maths.squ'), "maths.square(maths.squ", 27)
+    check("signature help while typing an argument", sig and sig["activeParameter"] == 0, json.dumps(sig))
+    # A dependency function, with its parameter names from the package source.
+    sig = signature(text.replace("n = maths.square(4)", 'n = string.pad_start("a", '), 'string.pad_start("a", ', 28)
+    check("signature help for a dependency has parameter names", sig and "desired_length" in sig["signatures"][0]["label"], json.dumps(sig))
+    edit(text, 29)
+
+    # --- FFI ------------------------------------------------------------------------
+    native_path = os.path.join(project, "src", "app", "native.bea")
+    native_text = open(native_path).read()
+    native_doc = {"uri": uri(native_path), "languageId": "bea", "version": 1, "text": native_text}
+    client.notify("textDocument/didOpen", {"textDocument": native_doc})
+    at_external = position_of(native_text, '"double"', 2)
+    definition = client.request("textDocument/definition", {"textDocument": {"uri": native_doc["uri"]}, "position": at_external})
+    d = json.dumps(definition)
+    check("definition of an @external goes to the Erlang function", "app_native_ffi.erl" in d and '"line": 5' in d, d)
+    hover = client.request("textDocument/hover", {"textDocument": {"uri": native_doc["uri"]}, "position": at_external})
+    h = json.dumps(hover)
+    check("hover on an @external shows the Erlang source", "Doubles a number" in h and "X * 2" in h, h)
 
     client.shutdown()
     stderr = "".join(client.stderr_lines)

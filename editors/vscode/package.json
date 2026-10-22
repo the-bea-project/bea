@@ -2,7 +2,7 @@
   "name": "bea-vscode",
   "displayName": "Bea Language Support",
   "description": "Syntax highlighting, diagnostics, completion, navigation and formatting for Bea",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "icon": "./icons/beatrix.png",
   "publisher": "bea-lang",
   "license": "Apache-2.0",
@@ -15,6 +15,7 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
+    "onLanguage:bea",
     "workspaceContains:**/bea.toml"
   ],
   "contributes": {
@@ -55,15 +56,41 @@
           "enum": ["off", "messages", "verbose"],
           "default": "off",
           "description": "Trace the communication between VS Code and the Bea language server."
+        },
+        "bea.completion.callParentheses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Complete functions with `()` and show their signature, with the cursor between the parentheses."
         }
+      }
+    },
+    "configurationDefaults": {
+      "[bea]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true,
+        "editor.wordBasedSuggestions": "off",
+        "editor.suggest.showWords": false,
+        "editor.quickSuggestions": { "other": "on", "comments": "off", "strings": "off" },
+        "editor.suggestSelection": "first",
+        "editor.parameterHints.enabled": true
       }
     },
     "commands": [
       {
         "command": "bea.restartServer",
         "title": "Bea: Restart Language Server"
+      },
+      {
+        "command": "bea.showGeneratedGleam",
+        "title": "Bea: Show Generated Gleam",
+        "enablement": "editorLangId == bea"
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "bea.showGeneratedGleam", "when": "editorLangId == bea" }
+      ]
+    }
   },
   "scripts": {
     "package": "vsce package"
