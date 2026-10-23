@@ -11,8 +11,11 @@
 //// definition dropped. Everything before the cursor is kept exactly, so
 //// positions up to the cursor are the same in the copy and in the buffer.
 
+import bea/lexer.{type Token, Token}
 import gleam/bit_array
+import gleam/int
 import gleam/list
+import gleam/result
 import gleam/string
 
 pub type Bracket {
@@ -375,9 +378,360 @@ pub fn candidates(text: String, offset: Int, hole: String) -> List(String) {
     ],
     // ... and of the file, in case something later is broken too.
     [prefix <> "\n" <> string.join(closers, "\n") <> "\n"],
+    // `case x|`, `Circle(|) ->`, `if x|`: closing brackets isn't enough,
+    // the construct being written needs its missing parts too.
+    case
+      list.contains(s.open, Interpolation),
+      unfinished(slice(text, 0, offset))
+    {
+      False, Ok(tail) -> {
+        let finished = prefix <> tail
+        let outer =
+          list.drop_while(s.open, fn(b) { b != Brace }) |> list.map(closer)
+        [
+          // The rest of the line is the unfinished construct's (`Circle(|)`).
+          finished <> slice(text, line_end(text, offset), size),
+          finished <> suffix,
+          finished <> "\n" <> string.join(outer, "\n") <> "\n\n" <> rest,
+          finished <> "\n" <> string.join(outer, "\n") <> "\n",
+        ]
+      }
+      _, _ -> []
+    },
   ]
   |> list.flatten
   |> list.unique
+}
+
+/// Offset of the end of the line `offset` is on.
+fn line_end(text: String, offset: Int) -> Int {
+  let size = string.byte_size(text)
+  case string.split_once(slice(text, offset, size), "\n") {
+    Ok(#(before, _)) -> offset + string.byte_size(before)
+    Error(_) -> size
+  }
+}
+
+// --- Unfinished constructs -----------------------------------------------------------
+
+/// What the innermost open `{` is the body of.
+type Body {
+  /// The clauses of a `case` with that many subjects.
+  CaseClauses(subjects: Int)
+  /// The clauses of a `cond`.
+  CondClauses
+  /// Statements: a function body, an `if` branch, an anonymous function ...
+  Statements
+  /// A map literal, ...
+  OtherBody
+}
+
+/// Brackets open while walking the tokens before the cursor: the opening
+/// token, what a `{` is the body of, and the tokens seen inside it so far
+/// at its own level (the brackets of a closed group, not what is in them),
+/// most recent first.
+type Frame {
+  Frame(opener: lexer.Kind, body: Body, tokens: List(Token))
+}
+
+/// Where the cursor is: in the body of what, writing which clause or
+/// statement, inside which brackets opened since.
+type Context {
+  Context(
+    body: Body,
+    /// The tokens of the clause or statement being written, from the start
+    /// of the cursor's line (none on an empty line).
+    current: List(Token),
+    /// What closes the brackets opened inside the body (`Circle(|` -> `)`).
+    closers: String,
+  )
+}
+
+fn context(before: String) -> Result(Context, Nil) {
+  let tokens =
+    lexer.lex(before).tokens
+    |> list.filter(fn(t) { t.kind != lexer.Eof })
+  let frames = list.fold(tokens, [Frame(lexer.LBrace, OtherBody, [])], step)
+  let #(inner, rest) =
+    list.split_while(frames, fn(f) { f.opener != lexer.LBrace })
+  let closers =
+    list.map(inner, fn(f) {
+      case f.opener {
+        lexer.LParen -> ")"
+        lexer.LBracket -> "]"
+        _ -> ">>"
+      }
+    })
+    |> string.concat
+  // Nothing written on the cursor's line yet.
+  let fresh_line = case list.last(tokens) {
+    Ok(t) ->
+      string.contains(slice(before, t.span.end, string.byte_size(before)), "\n")
+    Error(_) -> False
+  }
+  case rest {
+    [Frame(_, body, tokens), ..] ->
+      Ok(Context(
+        body:,
+        current: case fresh_line {
+          True -> []
+          False -> current_line(list.reverse(tokens))
+        },
+        closers:,
+      ))
+    [] -> Error(Nil)
+  }
+}
+
+/// The code that finishes the construct being written just before the
+/// cursor (`before` is the text up to the cursor), for constructs whose
+/// keywords are incomplete rather than their brackets:
+///
+/// - `case x|` and `case a, b|` need a body: ` {\n_, _ -> Nil\n}`
+/// - a `case` pattern (`Ci|`, `Circle(|`) or clause guard (`if x|`), and a
+///   `cond` condition, need an arrow and a body: `) -> Nil`
+/// - `if x|` and `else if x|` need a block: ` { Nil }`
+///
+/// Brackets open after the construct's keyword (`case f(x|`) are closed
+/// first.
+pub fn unfinished(before: String) -> Result(String, Nil) {
+  use Context(body, current, closers) <- result.try(context(before))
+  case body {
+    CaseClauses(_) | CondClauses ->
+      case split_at_last_arrow(current) {
+        // A pattern, a clause guard, a `cond` condition.
+        Error(_) -> Ok(closers <> " -> Nil")
+        Ok(clause_body) -> expression_tail(clause_body, closers)
+      }
+    Statements -> expression_tail(current, closers)
+    OtherBody -> Error(Nil)
+  }
+}
+
+/// Is the cursor in a `case` pattern (`Ci|`, `Circle(Re|`)?
+pub fn in_pattern(text: String, offset: Int) -> Bool {
+  result.is_ok(pattern_clause(slice(text, 0, offset)))
+}
+
+/// The number of subjects of the case, and of patterns written so far in
+/// the clause's current alternative.
+fn pattern_clause(before: String) -> Result(#(Int, Int), Nil) {
+  use Context(body, current, _) <- result.try(context(before))
+  use subjects <- result.try(case body {
+    CaseClauses(n) -> Ok(n)
+    _ -> Error(Nil)
+  })
+  // A clause guard (`Circle(r) if |`) and a body are expressions already.
+  use <- bool_result(
+    !list.any(current, fn(t) { t.kind == lexer.Arrow || t.kind == lexer.If }),
+  )
+  let written =
+    list.fold(current, 1, fn(n, t) {
+      case t.kind {
+        lexer.Comma -> n + 1
+        lexer.Pipe -> 1
+        _ -> n
+      }
+    })
+  Ok(#(subjects, written))
+}
+
+/// For completion in a `case` pattern: `gleam lsp` only completes
+/// expressions, so the name being typed is asked about as the clause's
+/// body instead. In the copies of `text` returned, the clause's line is
+/// the pattern with `_` for that name and the brackets closed, `_` for the
+/// subjects not written yet, and the name as the body, with `hole` after it:
+/// `Ok(Ci|` -> `Ok(_), _ -> { _ = Cihole todo }`. Also returns the offset of `hole` in
+/// the copies (the same in all of them).
+pub fn pattern_as_expression(
+  text: String,
+  offset: Int,
+  hole: String,
+) -> Result(#(List(String), Int), Nil) {
+  let before = slice(text, 0, offset)
+  use #(subjects, written) <- result.try(pattern_clause(before))
+  use Context(_, _, closers) <- result.try(context(before))
+  let word = word_start(text, offset)
+  let name_start = case char_before(text, word) {
+    "." -> word_start(text, word - 1)
+    _ -> word
+  }
+  let line_start = offset - string.byte_size(line_text_before(text, offset))
+  let size = string.byte_size(text)
+  let clause =
+    slice(text, 0, name_start)
+    <> "_"
+    <> closers
+    <> string.repeat(", _", int.max(subjects - written, 0))
+    // Not the body itself: Gleam favours names of the type the other
+    // clauses return, which has nothing to do with the pattern.
+    <> " -> {\n_ = "
+    <> slice(text, name_start, offset)
+  let request = string.byte_size(clause)
+  let clause = clause <> hole <> "\ntodo\n}"
+  let outer =
+    scan(slice(text, 0, line_start)).open
+    |> list.map(closer)
+  Ok(#(
+    [
+      clause <> slice(text, line_end(text, offset), size),
+      clause
+        <> "\n"
+        <> string.join(outer, "\n")
+        <> "\n\n"
+        <> slice(text, next_item(text, offset), size),
+      clause <> "\n" <> string.join(outer, "\n") <> "\n",
+    ],
+    request,
+  ))
+}
+
+fn bool_result(ok: Bool, next: fn() -> Result(a, Nil)) -> Result(a, Nil) {
+  case ok {
+    True -> next()
+    False -> Error(Nil)
+  }
+}
+
+/// The text before `offset` on the same line, leading spaces included.
+fn line_text_before(text: String, offset: Int) -> String {
+  case string.split(slice(text, 0, offset), "\n") |> list.last {
+    Ok(line) -> line
+    Error(_) -> ""
+  }
+}
+
+fn step(frames: List(Frame), t: Token) -> List(Frame) {
+  case frames {
+    [] -> []
+    [top, ..outer] -> {
+      let seen = Frame(..top, tokens: [t, ..top.tokens])
+      case t.kind {
+        lexer.LParen | lexer.LBracket | lexer.LtLt -> [
+          Frame(t.kind, OtherBody, []),
+          seen,
+          ..outer
+        ]
+        lexer.LBrace -> [Frame(t.kind, body_of(top.tokens), []), seen, ..outer]
+        lexer.RParen | lexer.RBracket | lexer.GtGt | lexer.RBrace ->
+          case outer {
+            [] -> [seen]
+            [parent, ..outer] -> [
+              Frame(..parent, tokens: [t, ..parent.tokens]),
+              ..outer
+            ]
+          }
+        _ -> [seen, ..outer]
+      }
+    }
+  }
+}
+
+/// What a `{` opens, from the tokens before it (most recent first).
+fn body_of(before: List(Token)) -> Body {
+  case before {
+    [Token(lexer.Percent, _, _), ..] -> OtherBody
+    [Token(lexer.Cond, _, _), ..] -> CondClauses
+    _ -> case_or_block(before, 1)
+  }
+}
+
+/// `case a, b {`: the clauses of a case with 2 subjects.
+fn case_or_block(before: List(Token), subjects: Int) -> Body {
+  case before {
+    [] -> Statements
+    [Token(lexer.Case, _, _), ..] -> CaseClauses(subjects)
+    [Token(lexer.Comma, _, _), ..rest] -> case_or_block(rest, subjects + 1)
+    [Token(kind, _, _), ..rest] ->
+      case kind {
+        // The `{` is the body of something else.
+        lexer.LBrace
+        | lexer.RBrace
+        | lexer.If
+        | lexer.Else
+        | lexer.Fn
+        | lexer.Def
+        | lexer.Arrow
+        | lexer.Eq
+        | lexer.LArrow -> Statements
+        _ -> case_or_block(rest, subjects)
+      }
+  }
+}
+
+/// The tokens from the last one that starts a line.
+fn current_line(tokens: List(Token)) -> List(Token) {
+  list.fold(tokens, [], fn(acc, t) {
+    case t.nl_before {
+      True -> [t]
+      False -> [t, ..acc]
+    }
+  })
+  |> list.reverse
+}
+
+/// The tokens after the last `->`, if there is one.
+fn split_at_last_arrow(tokens: List(Token)) -> Result(List(Token), Nil) {
+  list.fold(tokens, Error(Nil), fn(acc, t) {
+    case t.kind, acc {
+      lexer.Arrow, _ -> Ok([])
+      _, Ok(after) -> Ok([t, ..after])
+      _, Error(_) -> acc
+    }
+  })
+  |> fn(r) {
+    case r {
+      Ok(after) -> Ok(list.reverse(after))
+      Error(_) -> Error(Nil)
+    }
+  }
+}
+
+/// `case x|` / `if x|` without their body, in an expression.
+fn expression_tail(
+  tokens: List(Token),
+  closers: String,
+) -> Result(String, Nil) {
+  // The last `case` or `if`, and what follows it.
+  let last =
+    list.fold(tokens, Error(Nil), fn(acc, t) {
+      case t.kind, acc {
+        lexer.Case, _ | lexer.If, _ -> Ok(#(t.kind, []))
+        _, Ok(#(k, after)) -> Ok(#(k, [t, ..after]))
+        _, Error(_) -> acc
+      }
+    })
+  case last {
+    Error(_) -> Error(Nil)
+    Ok(#(keyword, after)) -> {
+      let has = fn(kind) { list.any(after, fn(t) { t.kind == kind }) }
+      // Its body was written already (and closed, or the cursor would be
+      // in it).
+      use <- bool_tail(has(lexer.LBrace))
+      case keyword {
+        lexer.Case -> {
+          let subjects = 1 + list.count(after, fn(t) { t.kind == lexer.Comma })
+          Ok(
+            closers
+            <> " {\n"
+            <> string.join(list.repeat("_", int.max(subjects, 1)), ", ")
+            <> " -> Nil\n}",
+          )
+        }
+        _ -> Ok(closers <> " { Nil }")
+      }
+    }
+  }
+}
+
+fn bool_tail(
+  stop: Bool,
+  next: fn() -> Result(String, Nil),
+) -> Result(String, Nil) {
+  case stop {
+    True -> Error(Nil)
+    False -> next()
+  }
 }
 
 /// Start of the next top-level item after `offset`: the first line that

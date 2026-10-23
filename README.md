@@ -542,7 +542,10 @@ IDE features on `.bea` files:
 - completion of locals and functions everywhere in a function: `case`,
   `cond` and `if` branches, after `?` and early returns, in `use` callbacks
   (Bea turns these into Gleam code of another shape; positions are mapped
-  onto the right Gleam token)
+  onto the right Gleam token), also while the construct is still being
+  written (`case x|` before its `{`, a clause guard or `cond` condition
+  before its `->`, `if x|` before its block); in `case` patterns, completion
+  of constructors
 - document symbols, and formatting (Bea's own formatter), which also
   **organises imports**, like `goimports`: the standard library
   (`gleam/...`), other dependencies and the project's own modules in sorted

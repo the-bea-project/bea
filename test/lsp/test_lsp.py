@@ -379,6 +379,16 @@ pub def main() {
         ("cond clause body", "  cond {\n    n > 1 -> sha@@\n    _ -> 1\n  }\n"),
         ("end of a use body", "  use x <- list.each([1])\n  x + sha@@\n"),
         ("map literal on its own line", "  %{\"k\": sha@@}\n"),
+        # Code being typed: the keywords around the cursor are unfinished,
+        # not only the brackets.
+        ("case subject before its body", "  case sha@@\n"),
+        ("case subject before more code", "  case @@\n  io.println(\"x\")\n"),
+        ("second case subject", "  case n, sha@@\n"),
+        ("case in a clause body", "  case n {\n    0 -> case sha@@\n  }\n"),
+        ("clause guard before its arrow", "  case n {\n    x if sha@@\n  }\n"),
+        ("cond condition before its arrow", "  cond {\n    n > sha@@ ->\n  }\n"),
+        ("if condition before its block", "  if sha@@\n"),
+        ("else if condition", "  if n > 1 {\n    1\n  } else if sha@@\n"),
     ]
     version = 40
     for name, body in flow_cases:
@@ -391,6 +401,31 @@ pub def main() {
         items = res["items"] if isinstance(res, dict) else (res or [])
         labels = [i["label"] for i in items]
         check(f"completion {name}: locals and functions", "shape" in labels and "n" in labels and "main" in labels, json.dumps(labels[:15]))
+        version += 1
+
+    # `case` patterns: `gleam lsp` only completes expressions, so Bea asks
+    # about the name as an expression and keeps the constructors.
+    pattern_cases = [
+        ("pattern", "  case shape {\n    Ci@@\n  }\n"),
+        ("pattern on an empty line", "  case shape {\n    @@\n  }\n"),
+        ("constructor argument", "  case shape {\n    Circle(@@)\n  }\n"),
+        ("second subject's pattern", "  case shape, n {\n    Circle(_), 1 -> 0\n    Ci@@\n  }\n"),
+        ("pattern alternative", "  case shape {\n    Circle(_) | @@\n  }\n"),
+    ]
+    for name, body in pattern_cases:
+        flow = text.replace("  echo maths.area(shape)\n", body.replace("@@", ""))
+        cursor = text.replace("  echo maths.area(shape)\n", body).index("@@")
+        edit(flow, version)
+        before = flow[:cursor]
+        p = {"line": before.count("\n"), "character": len(before) - (before.rfind("\n") + 1)}
+        res = client.request("textDocument/completion", {"textDocument": {"uri": doc["uri"]}, "position": p})
+        items = res["items"] if isinstance(res, dict) else (res or [])
+        labels = [i["label"] for i in items]
+        check(
+            f"completion in a {name}: constructors only",
+            "Circle" in labels and "maths.Rect" in labels and "True" in labels and "shape" not in labels and "main" not in labels,
+            json.dumps(labels[:15]),
+        )
         version += 1
     edit(text, version)
 

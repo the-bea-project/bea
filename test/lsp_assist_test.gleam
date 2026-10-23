@@ -56,6 +56,78 @@ pub def other() { 1 }
   assert string.contains(fixed, "pub def other()")
 }
 
+/// `text` with the cursor at `@@`: the first repaired copy that compiles,
+/// and where the hole went in it.
+fn repaired_at(text: String) -> Result(String, Nil) {
+  let assert Ok(#(before, after)) = string.split_once(text, "@@")
+  repair.candidates(before <> after, string.byte_size(before), "hole")
+  |> list.find(fn(c) {
+    result.is_ok(compiler.compile(c, codegen.empty_context()))
+  })
+}
+
+fn in_main(body: String) -> String {
+  "pub def main() {\n  n = 1\n" <> body <> "\n}\n\npub def other() { 2 }\n"
+}
+
+pub fn repair_unfinished_case_subject_test() {
+  // No body yet, at the end of the line or before more code.
+  let assert Ok(fixed) = repaired_at(in_main("  case n@@"))
+  assert string.contains(fixed, "case nhole {\n_ -> Nil\n}")
+  assert string.contains(fixed, "pub def other()")
+  let assert Ok(fixed) = repaired_at(in_main("  case @@\n  io.println(\"x\")"))
+  assert string.contains(fixed, "io.println")
+  // One `_` per subject; brackets opened in the subject closed first.
+  let assert Ok(fixed) = repaired_at(in_main("  case n, f(@@"))
+  assert string.contains(fixed, "case n, f(hole) {\n_, _ -> Nil\n}")
+  // Inside a clause body.
+  let assert Ok(fixed) =
+    repaired_at(in_main("  case n {\n    1 -> case @@\n  }"))
+  assert string.contains(fixed, "1 -> case hole {")
+}
+
+pub fn repair_unfinished_patterns_and_conditions_test() {
+  let assert Ok(fixed) = repaired_at(in_main("  case n {\n    Some(@@)\n  }"))
+  assert string.contains(fixed, "Some(hole) -> Nil\n  }")
+  let assert Ok(fixed) =
+    repaired_at(in_main("  case n {\n    Ok(x) if x > @@\n  }"))
+  assert string.contains(fixed, "if x > hole -> Nil")
+  let assert Ok(fixed) = repaired_at(in_main("  cond {\n    n > @@ ->\n  }"))
+  assert string.contains(fixed, "n > hole -> Nil\n  }")
+  let assert Ok(fixed) = repaired_at(in_main("  if n > @@"))
+  assert string.contains(fixed, "if n > hole { Nil }")
+  let assert Ok(fixed) =
+    repaired_at(in_main("  if n > 1 {\n    1\n  } else if @@"))
+  assert string.contains(fixed, "else if hole { Nil }")
+  // A map literal's braces aren't a block.
+  assert repair.unfinished("  x = %{\"a\": case n") == Error(Nil)
+}
+
+pub fn repair_keeps_working_repairs_test() {
+  // Complete code around the cursor: nothing is added.
+  let assert Ok(fixed) = repaired_at(in_main("  case n@@ {\n    _ -> 1\n  }"))
+  assert string.contains(fixed, "case nhole {\n    _ -> 1\n  }")
+  assert !string.contains(fixed, "Nil")
+}
+
+pub fn pattern_as_expression_test() {
+  let text = in_main("  case n, m {\n    Ok(x), 1 -> 0\n    Ok(Ci\n  }")
+  let offset = offset_after(text, "Ok(Ci")
+  assert repair.in_pattern(text, offset)
+  let assert Ok(#([first, ..], request)) =
+    repair.pattern_as_expression(text, offset, "hole")
+  assert string.contains(first, "    Ok(_), _ -> {\n_ = Cihole\ntodo\n}\n  }")
+  assert repair.slice(first, request, request + 4) == "hole"
+  assert result.is_ok(compiler.compile(first, codegen.empty_context()))
+  // Not in a guard, a clause body or a statement.
+  let text = in_main("  case n {\n    Ok(x) if Ci\n  }")
+  assert !repair.in_pattern(text, offset_after(text, "if Ci"))
+  let text = in_main("  case n {\n    Ok(x) -> Ci\n  }")
+  assert !repair.in_pattern(text, offset_after(text, "-> Ci"))
+  let text = in_main("  Ci")
+  assert !repair.in_pattern(text, offset_after(text, "  Ci"))
+}
+
 pub fn no_completion_in_strings_and_comments_test() {
   let text = "pub def f() {\n  // list.\n  \"a #{x.y} b.\" <> \"c.\n}\n"
   assert repair.in_text(text, offset_after(text, "// list."))

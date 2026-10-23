@@ -514,23 +514,34 @@ prepend_to_path(Dir) ->
     os:putenv("PATH", unicode:characters_to_list(Dir) ++ ":" ++ Old),
     nil.
 
-%% The shell runs the project's code in Bea's own VM. First every module of
-%% Bea and its dependencies (gsh included) is loaded, so they keep working
-%% whatever the project brings; then the project's build directories are
-%% put in front of the code path. Returns the project modules that can't be
-%% loaded because Bea already has a module of that name (e.g. a project
-%% `ffi.erl`, the name of gsh's FFI module).
+%% The shell runs the project's code in Bea's own VM. First Bea's own copy
+%% of every module the project and its dependencies also define is loaded,
+%% so Bea and its dependencies (gsh included) keep working whatever the
+%% project brings; then the project's build directories are put in front of
+%% the code path. Returns the project modules that can't be loaded because
+%% Bea already has a module of that name (e.g. a project `ffi.erl`, the
+%% name of gsh's FFI module).
+%%
+%% The modules to load first are also found from the project's side: Bea's
+%% own may not be in directories outside OTP's `lib` (a release or a
+%% gleepack binary keeps its applications in `lib` too), and then the
+%% project's `ffi` was the one loaded when gsh first called
+%% `ffi:trap_exits()`.
 shell_code_paths(BuildDir, Package) ->
+    Base = unicode:characters_to_list(BuildDir),
+    Paths = filelib:wildcard(filename:join([Base, "build", "dev", "erlang", "*", "ebin"])),
+    % Bea's own directories, when they can be told apart from OTP's: also
+    % covers modules the project only gets later (`:cc`).
     Otp = code:lib_dir(),
     Own = [P || P <- code:get_path(), not lists:prefix(Otp, P), P =/= "."],
+    % Loads Bea's copy of a module, if it has one: the project's directories
+    % aren't in the code path yet.
     lists:foreach(fun(Dir) ->
         lists:foreach(fun(Beam) ->
             Module = list_to_atom(filename:basename(Beam, ".beam")),
             _ = code:ensure_loaded(Module)
         end, filelib:wildcard(filename:join(Dir, "*.beam")))
-    end, Own),
-    Base = unicode:characters_to_list(BuildDir),
-    Paths = filelib:wildcard(filename:join([Base, "build", "dev", "erlang", "*", "ebin"])),
+    end, Own ++ Paths),
     lists:foreach(fun(P) -> code:add_patha(P) end, Paths),
     ProjectEbin = filename:join([Base, "build", "dev", "erlang",
                                  unicode:characters_to_list(Package), "ebin"]),
@@ -543,7 +554,9 @@ is_clash(Module, Beam) ->
     case code:is_loaded(Module) of
         {file, Loaded} when is_list(Loaded) ->
             filename:dirname(Loaded) =/= filename:dirname(Beam);
-        _ -> false
+        % Preloaded, or loaded from a binary (a packaged executable).
+        {file, _} -> true;
+        false -> false
     end.
 
 %% Directory of a package Bea itself was built with (`.../simplifile`).

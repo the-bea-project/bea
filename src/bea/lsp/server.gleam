@@ -1488,10 +1488,28 @@ fn positional_bea(
           state
         }
         False ->
-          case up_to_date && is_name_char(before) {
-            True ->
+          case
+            repair.pattern_as_expression(document.text, offset, placeholder),
+            up_to_date && is_name_char(before)
+          {
+            // `gleam lsp` doesn't complete patterns: ask about the name as
+            // an expression, and keep the constructors (see `completion`).
+            Ok(#(sources, request)), _ ->
+              repaired_sources(
+                state,
+                child,
+                id,
+                method,
+                params,
+                document,
+                sources,
+                request,
+                offset,
+                False,
+              )
+            Error(_), True ->
               forward_at(state, child, id, method, params, document, offset)
-            False ->
+            Error(_), False ->
               repaired(
                 state,
                 child,
@@ -1693,9 +1711,38 @@ fn repaired(
   at: Int,
   hole: String,
 ) -> State {
+  repaired_sources(
+    state,
+    child,
+    id,
+    method,
+    params,
+    document,
+    repair.candidates(document.text, at, hole),
+    offset,
+    offset,
+    hole == "",
+  )
+}
+
+/// Answer a request on the first of `sources` that compiles, at `request`
+/// (an offset in that copy); `cursor` is where the cursor is in the real
+/// document. With `inclusive`, an offset just after a name maps too.
+fn repaired_sources(
+  state: State,
+  child: Child,
+  id: Json,
+  method: String,
+  params: Json,
+  document: Document,
+  sources: List(String),
+  request: Int,
+  cursor: Int,
+  inclusive: Bool,
+) -> State {
   let gleam_path = generated_path(child, document.path)
   let compiled =
-    repair.candidates(document.text, at, hole)
+    sources
     |> list.find_map(fn(patched) {
       compiler.compile(patched, child.context)
       |> result.map(fn(c) { #(patched, c) })
@@ -1709,9 +1756,9 @@ fn repaired(
     }
     Ok(#(patched, compiled)) -> {
       let map = sourcemap.new(compiled.mappings, patched, compiled.gleam)
-      let gleam_offset = case hole {
-        "" -> sourcemap.to_gleam_offset_inclusive(map, offset)
-        _ -> sourcemap.to_gleam_offset(map, offset)
+      let gleam_offset = case inclusive {
+        True -> sourcemap.to_gleam_offset_inclusive(map, request)
+        False -> sourcemap.to_gleam_offset(map, request)
       }
       case gleam_offset {
         None -> {
@@ -1746,7 +1793,7 @@ fn repaired(
               method,
               document.path,
               Some(map),
-              offset,
+              cursor,
               Some(gleam_path),
               None,
             ),
@@ -2281,6 +2328,9 @@ const kind_constructor = 4
 
 const kind_variable = 6
 
+/// Constructors without fields (`True`, `None`).
+const kind_enum_member = 20
+
 const kind_constant = 21
 
 fn completion(
@@ -2436,6 +2486,8 @@ fn completion(
       && !string.contains(text, label)
     }
   }
+  // In a `case` pattern only constructors can be written.
+  let in_pattern = repair.in_pattern(text, cursor)
   let gleam_items = case result {
     json.Array(items) -> items
     json.Object(_) ->
@@ -2448,6 +2500,10 @@ fn completion(
   let items =
     gleam_items
     |> list.filter(wanted)
+    |> list.filter(fn(item) {
+      let kind = json.int_at(item, ["kind"]) |> option.unwrap(0)
+      !in_pattern || kind == kind_constructor || kind == kind_enum_member
+    })
     |> list.map(bea_types)
     |> list.map(fix_item)
   // Values from modules that aren't imported yet, for a bare name.
@@ -2464,6 +2520,10 @@ fn completion(
       unimported(child, text, pending.path, prefix, offered)
     }
   }
+  let extra =
+    list.filter(extra, fn(e) {
+      !in_pattern || { e.0 }.kind == index.Constructor
+    })
   let extra =
     list.map(extra, fn(e) {
       let #(entry, qualifier, sort) = e
