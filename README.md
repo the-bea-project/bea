@@ -80,7 +80,7 @@ my_app/
 | `bea deps list\|download\|tree` | Inspect dependencies |
 | `bea check` | Type check |
 | `bea build` | Build (`--target javascript`, `--warnings-as-errors`, ...) |
-| `bea run [FILE.bea \| -m MODULE] [-- ARGS]` | Run a module's `main` |
+| `bea run [-m MODULE \| FILE.bea] [ARGS]` | Run a module's `main`: the project's, or a dependency's such as a Gleam tool (`bea run -m marmot migrate`) |
 | `bea format [--check] [--stdin] [--imports] [PATHS]` | Format `.bea` files (`--imports` also organises imports) |
 | `bea shell` | Interactive Bea shell (REPL) in the project, built on GSH |
 | `bea transpile FILE.bea` | Print the Gleam generated for a file (`--stdin` reads the source from stdin) |
@@ -119,7 +119,24 @@ source directory, which is handy for scripts and exercises.
 OTP application is started, panics are printed with Bea locations), but from
 the project root rather than from `.beabuild/`, so relative paths and `.env`
 files resolve against your project. `--target javascript` runs it on Node
-(`--runtime bun` / `deno` for those).
+(`--runtime bun` / `deno` for those). Nothing runs unless the build
+succeeded.
+
+Its arguments follow `gleam run`: options first, then the program's
+arguments, which start at the first argument that isn't an option and are
+passed on unchanged. Put them after `--` when they start with `-`:
+
+```sh
+bea run                           # main of src/<package>.bea
+bea run -m app/tasks/seed         # another module of the project
+bea run serve --port 4000         # the program gets ["serve", "--port", "4000"]
+bea run -- --port 4000            # ... ["--port", "4000"]
+bea run --help                    # help for `bea run` itself
+```
+
+Options `bea run` doesn't know are an error rather than being passed to the
+build, and an unknown module or one without a public `main` gets a diagnostic
+(with a hint when, say, the package was never downloaded).
 
 Ctrl+C stops the program and gives the terminal back exactly as it was.
 Programs started by an Erlang VM live in a session of their own, so they
@@ -170,6 +187,56 @@ pub def user_decoder() -> decode.Decoder(User) {
   decode.success(User(name:, age:))
 }
 ```
+
+### Gleam tools and generated code
+
+`-m` also runs modules of dependencies, so Gleam tools work as they do with
+`gleam run -m`, e.g. [Marmot](https://hex.pm/packages/marmot), which
+generates typed functions for SQLite queries:
+
+```sh
+bea add sqlight
+bea add --dev marmot
+bea run -m marmot help
+bea run -m marmot migrate --database dev.sqlite   # db/migrations/*.sql
+bea run -m marmot -- --database dev.sqlite        # src/**/sql/*.sql -> src/generated/sql/
+```
+
+Tools run from the project root, so they find `src/`, `db/` & co where they
+expect them, and write generated code into your `src/`. Tools read their
+settings (`[tools.marmot]`) from `gleam.toml`; Bea points them at
+`bea.toml` (a `gleam.toml` symlink exists while the tool runs, unless the
+project has a `gleam.toml` of its own), so the settings go in `bea.toml`:
+
+```toml
+[tools.marmot]
+database = "dev.sqlite"
+```
+
+Gleam modules in `src/` are compiled together with the Bea modules, wherever
+they come from, so Bea code imports generated modules like any other:
+
+```bea
+import generated/sql/users_sql.{FindUserRow}
+import sqlight
+
+pub def main() {
+  use db <- sqlight.with_connection("dev.sqlite")
+  Ok([FindUserRow(name:, ..)]) = users_sql.find_user(db:, username: "bea")
+    else panic
+  io.println(name)
+}
+```
+
+Bea never writes to `src/`: generated files stay where the tool put them, and
+the build follows them when they are regenerated or deleted. Gleam checks the
+types across Bea and Gleam modules; Bea itself also reads the record types of
+the project's Gleam modules, so a pattern that can't fail (`FindUserRow(..) =
+row`) compiles to `let` rather than a `let assert` Gleam would warn about.
+
+As with `gleam run -m`, the whole project is built before a tool runs: Bea
+code that imports a module the tool hasn't generated yet has to wait until it
+has.
 
 ### The shell
 
@@ -514,6 +581,11 @@ evaluated when the assertion fails.
 - Doc comments on individual record fields aren't passed on to Gleam.
 - `bea test` and `bea docs` aren't implemented; run the Gleam equivalents
   inside `.beabuild/` if you need them.
+- Path dependencies (`{ path = "..." }`) are resolved from `.beabuild/`, so
+  relative paths need a `../` (or use an absolute path).
+- Tools that compile the project themselves by running `gleam build` in the
+  current directory don't understand `.bea` files; tools that only use their
+  own code and the project's files (like Marmot) work.
 
 ## Editor support
 
@@ -616,6 +688,7 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/project` | Project discovery, `.beabuild` sync, manifest handling, compile cache |
 | `bea/gleam_output` | Rewrites Gleam CLI output to Bea locations |
 | `bea/cli` | The `bea` command |
+| `bea/entrypoint` | `bea run`: its arguments, finding the module to run (in the project or a dependency), tool configuration |
 | `bea/style`, `bea/highlight` | The CLI's colours, and syntax highlighting of Bea and Gleam |
 | `bea/shell`, `bea/line_editor` | `bea shell`: Bea front end for GSH's evaluator, and its line editor |
 | `bea/lsp/*` | JSON, JSON-RPC transport, the proxying language server |
@@ -629,6 +702,7 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 gleam test                      # unit tests
 gleam build && export PATH=$PWD/scripts:$PATH
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
+scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code (BEA_TEST_MARMOT=1: also Marmot)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
 ```

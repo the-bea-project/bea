@@ -1,0 +1,8 @@
+name = "fixture_tool"
+version = "1.0.0"
+description = "A stand-in for Gleam tools such as Marmot, used by Bea's tests"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"

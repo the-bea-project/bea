@@ -9,7 +9,7 @@
     foreground_child/0, was_interrupted/0, file_exists/1, no_foreground/0,
     shell_read_line/1, set_cwd/1, prepend_to_path/1,
     shell_code_paths/2, package_dir/1, shell_raw_mode/0, shell_restore_mode/1,
-    shell_read_char/0, shell_write/1
+    shell_read_char/0, shell_write/1, beam_exports_main/1, read_link/1
 ]).
 
 init() ->
@@ -20,6 +20,20 @@ init() ->
 
 file_exists(Path) ->
     filelib:is_regular(unicode:characters_to_list(Path)).
+
+%% Does a compiled module export `main/0` (Gleam's `pub fn main()`)?
+beam_exports_main(Path) ->
+    case beam_lib:chunks(unicode:characters_to_list(Path), [exports]) of
+        {ok, {_, [{exports, Exports}]}} -> lists:member({main, 0}, Exports);
+        _ -> false
+    end.
+
+%% The target of a symbolic link.
+read_link(Path) ->
+    case file:read_link(unicode:characters_to_list(Path)) of
+        {ok, Target} -> {ok, unicode:characters_to_binary(Target)};
+        {error, _} -> {error, nil}
+    end.
 
 find_executable(Name) ->
     case os:find_executable(binary_to_list(Name)) of

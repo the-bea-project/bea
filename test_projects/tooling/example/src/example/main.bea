@@ -1,0 +1,14 @@
+import generated/sql/example_sql.{GreetingRow}
+
+pub def main() {
+  case example_sql.find_greeting(db: "dev.sqlite", id: 1) {
+    Ok([GreetingRow(text: | _)]) -> io.println(text)
+    Ok(_) -> io.println_error("unexpected rows")
+    Error(e) -> io.println_error(e)
+  }
+  Ok([row]) = example_sql.find_greeting(db: "dev.sqlite", id: 1) else panic
+  GreetingRow(id: | _) = row
+  io.println("id #{int.to_string(id)}")
+  Error(missing) = example_sql.find_greeting(db: "dev.sqlite", id: 2) else panic
+  io.println(missing)
+}

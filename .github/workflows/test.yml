@@ -30,5 +30,9 @@ jobs:
           echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
       - name: End-to-end tests (fixtures, exercism examples, formatter)
         run: scripts/test_examples.sh
+      - name: End-to-end tests (Gleam tools, generated code, Marmot)
+        run: scripts/test_tooling.sh
+        env:
+          BEA_TEST_MARMOT: "1"
       - name: Language server tests
         run: python3 test/lsp/test_lsp.py

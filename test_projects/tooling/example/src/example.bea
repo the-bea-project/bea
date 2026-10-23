@@ -1,0 +1,11 @@
+import argv
+
+pub def main() {
+  case argv.load().arguments {
+    [] -> io.println("example: no arguments")
+    args ->
+      io.println(
+        "example: " <> string.join(list.map(args, fn(a) { "[#{a}]" }), " "),
+      )
+  }
+}

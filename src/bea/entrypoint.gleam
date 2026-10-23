@@ -1,0 +1,420 @@
+//// `bea run`: what to run, with which arguments, and where to find it.
+////
+//// The command line follows `gleam run`:
+////
+////     bea run [OPTIONS] [FILE.bea] [ARGUMENTS]...
+////
+//// Options (`-m`, `--target`, ...) come first. The first argument that isn't
+//// an option starts the program's arguments, and everything from there on
+//// is passed to the program untouched, flags included:
+//// `bea run -m marmot migrate --database dev.sqlite`. Program arguments that
+//// begin with `-` go after `--`: `bea run -m marmot -- --database dev.sqlite`.
+////
+//// The module may be one of the project's or come from a dependency (a
+//// Gleam tool such as Marmot). Either way it is started through the
+//// `<package>@@main` entrypoint Gleam generates for the project, exactly as
+//// `gleam run -m` does.
+
+import bea/project.{type Project}
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
+import simplifile
+
+pub type RunArgs {
+  RunArgs(
+    /// A `.bea` file to run (script mode, or a module of the project).
+    file: Option(String),
+    /// `-m` / `--module`.
+    module: Option(String),
+    /// `-t` / `--target`.
+    target: Option(String),
+    /// `--runtime` (JavaScript only; `gleam build` doesn't know it).
+    runtime: Option(String),
+    /// Flags for `gleam build`.
+    build_flags: List(String),
+    /// Arguments for the program.
+    program_args: List(String),
+    /// `-h` / `--help`.
+    help: Bool,
+  )
+}
+
+/// Parse the arguments of `bea run` (without the `run`).
+pub fn parse_run_args(args: List(String)) -> Result(RunArgs, String) {
+  parse(args, RunArgs(None, None, None, None, [], [], False))
+}
+
+fn parse(args: List(String), acc: RunArgs) -> Result(RunArgs, String) {
+  let done = fn(acc: RunArgs, program_args) {
+    Ok(
+      RunArgs(
+        ..acc,
+        build_flags: list.reverse(acc.build_flags),
+        program_args: program_args,
+      ),
+    )
+  }
+  case args {
+    [] -> done(acc, [])
+    ["--", ..rest] -> done(acc, rest)
+    ["-h", ..] | ["--help", ..] -> done(RunArgs(..acc, help: True), [])
+
+    ["-m"] | ["--module"] | ["--module="] ->
+      Error(
+        "`-m` needs the name of the module to run, e.g. `bea run -m marmot`",
+      )
+    ["-m", module, ..rest] | ["--module", module, ..rest] ->
+      parse(rest, RunArgs(..acc, module: Some(module)))
+    ["--module=" <> module, ..rest] ->
+      parse(rest, RunArgs(..acc, module: Some(module)))
+
+    ["-t"] | ["--target"] | ["--target="] ->
+      Error("`--target` needs a target: erlang or javascript")
+    ["-t", target, ..rest] | ["--target", target, ..rest] ->
+      parse(rest, with_target(acc, target))
+    ["--target=" <> target, ..rest] -> parse(rest, with_target(acc, target))
+
+    ["--runtime"] | ["--runtime="] ->
+      Error("`--runtime` needs a runtime: nodejs, deno or bun")
+    ["--runtime", runtime, ..rest] | ["--runtime=" <> runtime, ..rest] ->
+      parse(rest, RunArgs(..acc, runtime: Some(runtime)))
+
+    ["--warnings-as-errors" as flag, ..rest]
+    | ["--no-print-progress" as flag, ..rest] ->
+      parse(rest, RunArgs(..acc, build_flags: [flag, ..acc.build_flags]))
+
+    // `bea run .` has always meant "this project".
+    [".", ..rest] if acc.file == None && acc.module == None -> parse(rest, acc)
+
+    [arg, ..rest] ->
+      case string.starts_with(arg, "-") && arg != "-" {
+        True -> Error(unknown_option(arg, rest, acc))
+        False ->
+          case
+            string.ends_with(arg, ".bea")
+            && acc.file == None
+            && acc.module == None
+          {
+            True -> parse(rest, RunArgs(..acc, file: Some(arg)))
+            False -> done(acc, [arg, ..rest])
+          }
+      }
+  }
+}
+
+fn with_target(acc: RunArgs, target: String) -> RunArgs {
+  RunArgs(..acc, target: Some(target), build_flags: [
+    target,
+    "--target",
+    ..acc.build_flags
+  ])
+}
+
+fn unknown_option(arg: String, rest: List(String), acc: RunArgs) -> String {
+  let args = string.join([arg, ..rest], " ")
+  let example = case acc.module {
+    Some(m) -> "bea run -m " <> m <> " -- " <> args
+    None -> "bea run -- " <> args
+  }
+  "Unknown option `"
+  <> arg
+  <> "` for `bea run`.\n"
+  <> "Arguments for the program go after the first argument that isn't an option,\n"
+  <> "or after `--` when they start with `-`: `"
+  <> example
+  <> "`. See `bea run --help`."
+}
+
+pub fn help() -> String {
+  "Run the `main` function of a module.
+
+Usage: bea run [OPTIONS] [FILE.bea] [ARGUMENTS]...
+
+The module is the one named after the package (src/<name>.bea), the one
+given with -m, or FILE.bea. With -m it can also be a module of a dependency,
+such as a Gleam tool: `bea run -m marmot` is `gleam run -m marmot`.
+
+Arguments:
+  [ARGUMENTS]...          Passed to the program, unchanged. They start at the
+                          first argument that isn't an option of `bea run`;
+                          put them after `--` when they start with `-`.
+
+Options:
+  -m, --module <MODULE>   The module to run (of the project or a dependency)
+  -t, --target <TARGET>   The platform to target: erlang or javascript
+      --runtime <RUNTIME> The JavaScript runtime: nodejs, deno or bun
+      --warnings-as-errors
+                          Fail the build if there are warnings
+      --no-print-progress Don't print progress information
+  -h, --help              Print this help
+
+Examples:
+  bea run
+  bea run -m marmot help
+  bea run -m marmot migrate --database dev.sqlite
+  bea run -m marmot -- --database dev.sqlite
+  bea run scripts/hello.bea -- --verbose
+
+The program runs from the project root, so relative paths (and a tool's
+idea of `src/`) are the project's. Code that a tool generates in src/ (e.g.
+Marmot's src/generated/sql/) is compiled with the project's Bea modules."
+}
+
+// --- Finding the module ----------------------------------------------------------
+
+pub type Target {
+  Erlang
+  JavaScript
+}
+
+/// A module that can be run: built, and with a public `main`.
+pub type Runnable {
+  Runnable(
+    /// Gleam module path, e.g. `marmot` or `app/tasks/seed`.
+    module: String,
+    /// The package it belongs to: the project's or a dependency's.
+    package: String,
+  )
+}
+
+pub type Problem {
+  Problem(message: String, hint: Option(String))
+}
+
+/// Look a module up in the build (`gleam build` must have run). Like
+/// `gleam run -m`, a module can come from the project or any dependency.
+pub fn find(
+  p: Project,
+  target: Target,
+  module: String,
+) -> Result(Runnable, Problem) {
+  use _ <- result.try(check_module_name(module))
+  let #(dir, file) = case target {
+    Erlang -> #(p.build_dir <> "/build/dev/erlang", fn(package) {
+      package <> "/ebin/" <> string.replace(module, "/", "@") <> ".beam"
+    })
+    JavaScript -> #(p.build_dir <> "/build/dev/javascript", fn(package) {
+      package <> "/" <> module <> ".mjs"
+    })
+  }
+  // The project's own package first: module names are unique across
+  // packages, but this keeps the common case cheap.
+  let packages =
+    simplifile.read_directory(dir)
+    |> result.unwrap([])
+    |> list.sort(string.compare)
+    |> list.partition(fn(package) { package == p.name })
+    |> fn(parts) { list.append(parts.0, parts.1) }
+  let found =
+    list.find_map(packages, fn(package) {
+      let path = dir <> "/" <> file(package)
+      case simplifile.is_file(path) {
+        Ok(True) -> Ok(#(package, path))
+        _ -> Error(Nil)
+      }
+    })
+  case found {
+    Error(_) -> Error(not_found(p, target, module, packages))
+    Ok(#(package, path)) ->
+      case has_main(target, path) {
+        True -> Ok(Runnable(module, package))
+        False -> Error(no_main(p, module, package))
+      }
+  }
+}
+
+/// Checked before building too, so a typo fails fast.
+pub fn check_module_name(module: String) -> Result(Nil, Problem) {
+  case project.valid_module_name(module) {
+    True -> Ok(Nil)
+    False ->
+      Error(Problem(
+        "`" <> module <> "` is not a valid module name",
+        Some(
+          "Module names are paths of lowercase names, e.g. `marmot` or `app/tasks/seed`.",
+        ),
+      ))
+  }
+}
+
+fn has_main(target: Target, path: String) -> Bool {
+  case target {
+    Erlang -> beam_exports_main(path)
+    JavaScript ->
+      case simplifile.read(path) {
+        Ok(code) -> string.contains(code, "export function main(")
+        Error(_) -> False
+      }
+  }
+}
+
+@external(erlang, "bea_ffi", "beam_exports_main")
+fn beam_exports_main(path: String) -> Bool
+
+fn not_found(
+  p: Project,
+  target: Target,
+  module: String,
+  built: List(String),
+) -> Problem {
+  let package = string.split(module, "/") |> list.first |> result.unwrap(module)
+  let message = "Module `" <> module <> "` was not found."
+  let declared = list.contains(dependency_names(p.config), package)
+  let downloaded =
+    simplifile.is_directory(p.build_dir <> "/build/packages/" <> package)
+    |> result.unwrap(False)
+  let hint = case declared, downloaded, list.contains(built, package) {
+    True, False, _ ->
+      "The package `"
+      <> package
+      <> "` is a dependency in "
+      <> project.config_file
+      <> ", but it was never downloaded:\n"
+      <> "manifest.toml lists it under [requirements] without locking a version\n"
+      <> "(was it edited by hand?), so Gleam doesn't resolve it again.\n"
+      <> "Run `bea add "
+      <> package
+      <> "` to resolve and lock it."
+    _, _, True ->
+      "The package `" <> package <> "` has no module `" <> module <> "`."
+    True, True, False ->
+      "The package `"
+      <> package
+      <> "` was not built for the "
+      <> case target {
+        Erlang -> "Erlang"
+        JavaScript -> "JavaScript"
+      }
+      <> " target."
+    False, _, _ ->
+      "Modules of the project and of its dependencies can be run. Create `src/"
+      <> module
+      <> ".bea`, or add the package that provides it with `bea add "
+      <> package
+      <> "`."
+  }
+  Problem(message, Some(hint))
+}
+
+fn no_main(p: Project, module: String, package: String) -> Problem {
+  let message =
+    "`"
+    <> module
+    <> "` does not have a public `main` function, so it can't be run."
+  case package == p.name {
+    True ->
+      Problem(
+        message,
+        Some("Add `pub def main() { ... }` to src/" <> module <> ".bea."),
+      )
+    False ->
+      Problem(
+        message,
+        Some(
+          "It comes from the dependency `"
+          <> package
+          <> "`: check its documentation for the module to run.",
+        ),
+      )
+  }
+}
+
+/// Names under `[dependencies]` and `[dev-dependencies]` of a config.
+pub fn dependency_names(config: String) -> List(String) {
+  config
+  |> string.split("\n")
+  |> list.fold(#(False, []), fn(acc, line) {
+    let #(in_deps, names) = acc
+    let line = string.trim(line)
+    case line {
+      "[" <> section -> #(
+        list.contains(
+          ["dependencies]", "dev-dependencies]", "dev_dependencies]"],
+          section,
+        ),
+        names,
+      )
+      _ if in_deps ->
+        case string.split_once(line, "=") {
+          Ok(#(name, _)) if name != "" -> #(in_deps, [
+            string.trim(name) |> string.replace("\"", ""),
+            ..names
+          ])
+          _ -> acc
+        }
+      _ -> acc
+    }
+  })
+  |> fn(acc) { list.reverse(acc.1) }
+}
+
+// --- Configuration for tools ------------------------------------------------------
+
+/// Gleam tools read their configuration (`[tools.marmot]` & co) from the
+/// `gleam.toml` of the directory they run in, and refuse to run without one.
+/// A Bea project has `bea.toml` instead, so while `run` runs, the project
+/// root gets a `gleam.toml` symlink to `bea.toml`: the tool sees the
+/// project's real configuration (and any change it makes lands in
+/// `bea.toml`). An existing `gleam.toml` is never touched.
+pub fn with_tool_config(p: Project, run: fn() -> a) -> a {
+  let path = p.root <> "/gleam.toml"
+  case p.script {
+    True -> run()
+    False ->
+      case simplifile.link_info(path) {
+        // Ours, left behind by a Bea that was killed: reuse it.
+        Ok(_) ->
+          case read_link(path) == Ok(project.config_file) {
+            True -> {
+              let result = run()
+              remove_link(path)
+              result
+            }
+            False -> run()
+          }
+        Error(_) ->
+          case simplifile.create_symlink(to: project.config_file, from: path) {
+            Ok(_) -> {
+              let result = run()
+              remove_link(path)
+              result
+            }
+            // No symlinks here: a copy, with changes copied back.
+            Error(_) ->
+              case simplifile.write(path, p.config) {
+                Error(_) -> run()
+                Ok(_) -> {
+                  let result = run()
+                  case simplifile.read(path) {
+                    Ok(config) if config != p.config -> {
+                      project.write_if_changed(
+                        p.root <> "/" <> project.config_file,
+                        config,
+                      )
+                      Nil
+                    }
+                    _ -> Nil
+                  }
+                  let _ = simplifile.delete(path)
+                  result
+                }
+              }
+          }
+      }
+  }
+}
+
+fn remove_link(path: String) -> Nil {
+  case read_link(path) == Ok(project.config_file) {
+    True -> {
+      let _ = simplifile.delete_file(path)
+      Nil
+    }
+    False -> Nil
+  }
+}
+
+@external(erlang, "bea_ffi", "read_link")
+fn read_link(path: String) -> Result(String, Nil)

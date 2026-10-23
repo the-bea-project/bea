@@ -7,6 +7,7 @@
 import bea/codegen
 import bea/compiler
 import bea/diagnostic
+import bea/entrypoint
 import bea/formatter
 import bea/gleam_output
 import bea/highlight
@@ -116,9 +117,10 @@ fn help() -> String {
     command("build", "", "Build the project"),
     command(
       "run",
-      "[FILE | -m MOD]",
-      "Run a module's `main` function (default: the project's)",
+      "[-m MOD] [ARGS]",
+      "Run a module's `main` (the project's, a file's, or a",
     ),
+    "                       dependency's such as a Gleam tool; see --help)",
     command("shell", "", "Start an interactive Bea shell (REPL) in the project"),
     command(
       "export",
@@ -280,13 +282,6 @@ fn run_gleam(p: Project, s: project.Sync, args: List(String)) -> Int {
       })
       code
     }
-  }
-}
-
-fn split_args(args: List(String)) -> #(List(String), List(String)) {
-  case list.split_while(args, fn(a) { a != "--" }) {
-    #(before, ["--", ..after]) -> #(before, after)
-    #(before, _) -> #(before, [])
   }
 }
 
@@ -469,9 +464,21 @@ fn compile_command(command: String, args: List(String)) -> Int {
 }
 
 fn run(args: List(String)) -> Int {
-  let #(args, program_args) = split_args(args)
-  let #(file, module, gleam_args) = parse_run_args(args, None, None, [])
-  let resolved = case file {
+  case entrypoint.parse_run_args(args) {
+    Error(message) -> {
+      error(message)
+      1
+    }
+    Ok(a) if a.help -> {
+      io.println(entrypoint.help())
+      0
+    }
+    Ok(a) -> run_parsed(a)
+  }
+}
+
+fn run_parsed(a: entrypoint.RunArgs) -> Int {
+  let resolved = case a.file {
     Some(f) ->
       case project.find(project.dirname(system.absolute_path(f))) {
         Ok(p) -> Ok(p)
@@ -480,22 +487,43 @@ fn run(args: List(String)) -> Int {
     None -> current_project()
   }
   use p <- or_exit(resolved)
-  let module = case module, file {
+  let module = case a.module, a.file {
     Some(m), _ -> m
     None, Some(f) -> project.module_name(p, system.absolute_path(f))
     None, None -> default_module(p) |> option.unwrap(p.name)
   }
-  let #(target, runtime, build_args) = run_target(p, gleam_args)
+  use _ <- or_exit(
+    entrypoint.check_module_name(module) |> result.map_error(report),
+  )
+  let #(target, runtime) = run_target(p, a.target, a.runtime)
   use s <- or_exit(sync(p))
   // Build in .beabuild/, then run the program ourselves from the project
   // root (not from .beabuild/ like `gleam run` would), so relative paths,
-  // `.env` files & co resolve against the user's project.
-  let code = case run_gleam(p, s, ["build", ..build_args]) {
+  // `.env` files & co resolve against the user's project. Nothing runs
+  // unless the build succeeded and produced the module.
+  let code = case run_gleam(p, s, ["build", ..a.build_flags]) {
     0 ->
       case system.was_interrupted() {
         // Ctrl+C while building: don't start the program.
         Ok(code) -> code
-        Error(_) -> run_program(p, s, target, runtime, module, program_args)
+        Error(_) ->
+          case entrypoint.find(p, target, module) {
+            Error(problem) -> {
+              report(problem)
+              1
+            }
+            Ok(runnable) -> {
+              let start = fn() {
+                run_program(p, s, target, runtime, runnable, a.program_args)
+              }
+              case runnable.package == p.name {
+                True -> start()
+                // A dependency's module, typically a tool: give it the
+                // project's configuration where Gleam tools look for it.
+                False -> entrypoint.with_tool_config(p, start)
+              }
+            }
+          }
       }
     code -> code
   }
@@ -503,24 +531,35 @@ fn run(args: List(String)) -> Int {
   code
 }
 
-type Target {
-  Erlang
-  JavaScript
+fn report(problem: entrypoint.Problem) -> Nil {
+  error(problem.message)
+  case problem.hint {
+    Some(hint) ->
+      system.print_stderr(
+        case colour() {
+          True -> style.accent("hint")
+          False -> "hint"
+        }
+        <> ": "
+        <> hint
+        <> "\n",
+      )
+    None -> Nil
+  }
 }
 
-/// The compile target and JavaScript runtime for `bea run`, and the
-/// arguments to pass on to `gleam build` (which doesn't know `--runtime`).
+/// The compile target and JavaScript runtime for `bea run`.
 fn run_target(
   p: Project,
-  args: List(String),
-) -> #(Target, String, List(String)) {
+  target: Option(String),
+  runtime: Option(String),
+) -> #(entrypoint.Target, String) {
   let parse_target = fn(t) {
     case t {
-      "javascript" | "js" -> JavaScript
-      _ -> Erlang
+      "javascript" | "js" -> entrypoint.JavaScript
+      _ -> entrypoint.Erlang
     }
   }
-  let #(target, runtime, rest) = collect_run_flags(args, None, None, [])
   let target = case target {
     Some(t) -> parse_target(t)
     None -> parse_target(config_value(p.config, "target") |> option.unwrap(""))
@@ -529,26 +568,7 @@ fn run_target(
     Some(r) -> r
     None -> config_value(p.config, "runtime") |> option.unwrap("nodejs")
   }
-  #(target, runtime, rest)
-}
-
-fn collect_run_flags(
-  args: List(String),
-  target: Option(String),
-  runtime: Option(String),
-  rest: List(String),
-) -> #(Option(String), Option(String), List(String)) {
-  case args {
-    [] -> #(target, runtime, list.reverse(rest))
-    ["--target", t, ..more] | ["-t", t, ..more] ->
-      collect_run_flags(more, Some(t), runtime, [t, "--target", ..rest])
-    ["--target=" <> t, ..more] ->
-      collect_run_flags(more, Some(t), runtime, ["--target=" <> t, ..rest])
-    ["--runtime", r, ..more] -> collect_run_flags(more, target, Some(r), rest)
-    ["--runtime=" <> r, ..more] ->
-      collect_run_flags(more, target, Some(r), rest)
-    [a, ..more] -> collect_run_flags(more, target, runtime, [a, ..rest])
-  }
+  #(target, runtime)
 }
 
 /// A `key = "value"` from the configuration (top-level keys only).
@@ -581,20 +601,22 @@ fn config_value(config: String, key: String) -> Option(String) {
 }
 
 /// Run `main` of a built module, the way `gleam run` does: on Erlang through
-/// the `<package>@@main` entrypoint Gleam generates (it starts the
-/// application so `application:get_key/2` & co work, and prints panics
-/// nicely), on JavaScript through a small entry module.
+/// the `<package>@@main` entrypoint Gleam generates for the project (it
+/// starts the application so `application:get_key/2` & co work, and prints
+/// panics nicely; it runs dependencies' modules too, as for `gleam run -m`),
+/// on JavaScript through a small entry module.
 fn run_program(
   p: Project,
   s: project.Sync,
-  target: Target,
+  target: entrypoint.Target,
   runtime: String,
-  module: String,
+  runnable: entrypoint.Runnable,
   program_args: List(String),
 ) -> Int {
   let rewriter = gleam_output.new(s.modules, p.build_dir, p.src_dir, colour())
+  let module = runnable.module
   let command = case target {
-    Erlang -> {
+    entrypoint.Erlang -> {
       let lib = p.build_dir <> "/build/dev/erlang"
       let ebin =
         simplifile.read_directory(lib)
@@ -625,12 +647,16 @@ fn run_program(
         ]),
       ))
     }
-    JavaScript -> {
+    entrypoint.JavaScript -> {
       let dir = p.build_dir <> "/build/dev/javascript/" <> p.name
       let entry = dir <> "/bea@@main.mjs"
+      let from = case runnable.package == p.name {
+        True -> "./"
+        False -> "../" <> runnable.package <> "/"
+      }
       project.write_if_changed(
         entry,
-        "import { main } from \"./" <> module <> ".mjs\";\nmain();\n",
+        "import { main } from \"" <> from <> module <> ".mjs\";\nmain();\n",
       )
       case runtime {
         "deno" -> Ok(#("deno", ["run", "--allow-all", entry, ..program_args]))
@@ -663,25 +689,6 @@ fn run_program(
       })
       code
     }
-  }
-}
-
-fn parse_run_args(
-  args: List(String),
-  file: Option(String),
-  module: Option(String),
-  rest: List(String),
-) -> #(Option(String), Option(String), List(String)) {
-  case args {
-    [] -> #(file, module, list.reverse(rest))
-    ["-m", m, ..more] | ["--module", m, ..more] ->
-      parse_run_args(more, file, Some(m), rest)
-    [".", ..more] -> parse_run_args(more, file, module, rest)
-    [a, ..more] ->
-      case string.ends_with(a, ".bea") {
-        True -> parse_run_args(more, Some(a), module, rest)
-        False -> parse_run_args(more, file, module, [a, ..rest])
-      }
   }
 }
 
