@@ -20,7 +20,7 @@ pub type LoginError {
 pub def login(body: String) -> Result(String, LoginError) {
   Credentials(username:, password:) = decoder.from_json(
     body,
-    credentials_decoder(),
+    Credentials.decoder(),
   )? else e -> Error(BadJson(e))
   password == "secret" else Error(WrongPassword)
   Ok("welcome, #{username}")
@@ -28,6 +28,6 @@ pub def login(body: String) -> Result(String, LoginError) {
 
 /// The same with plain `?`, for a function returning the library's error.
 pub def username(body: String) -> Result(String, json.DecodeError) {
-  credentials = decoder.from_json(body, credentials_decoder())?
+  credentials = decoder.from_json(body, Credentials.decoder())?
   Ok(credentials.username)
 }

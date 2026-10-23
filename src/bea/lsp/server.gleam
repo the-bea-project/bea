@@ -2141,11 +2141,14 @@ fn hover(state: State, child: Child, pending: Pending, result: Json) -> Json {
   case dict.get(state.docs, pending.path) {
     Error(_) -> bea_types(result)
     Ok(document) -> {
-      let #(qualifier, name, _, _) =
+      let imports = assist.imports(document.text)
+      let #(qualifier, name, name_start, _) =
         repair.qualified_name_at(document.text, pending.cursor)
+      let #(qualifier, name) =
+        assist.through_type(imports, document.text, qualifier, name, name_start)
       let entry =
         assist.resolve(
-          assist.imports(document.text),
+          imports,
           current_module(child, document),
           qualifier,
           name,
@@ -2233,16 +2236,33 @@ fn signature_from_hover(
   case assist.fn_type(assist.bea_type(code)) {
     None -> json.Null
     Some(#(types, ret)) -> {
-      let entry = case dict.get(state.docs, pending.path) {
-        Ok(d) ->
-          assist.resolve(
-            assist.imports(d.text),
-            current_module(child, d),
-            call.qualifier,
-            call.name,
-            lookup(child),
+      let #(entry, qualifier, called) = case
+        dict.get(state.docs, pending.path)
+      {
+        Ok(d) -> {
+          let imports = assist.imports(d.text)
+          // `Label.new(` is `labels.label_new(`.
+          let #(qualifier, called) =
+            assist.through_type(
+              imports,
+              d.text,
+              call.qualifier,
+              call.name,
+              call.name_start,
+            )
+          #(
+            assist.resolve(
+              imports,
+              current_module(child, d),
+              qualifier,
+              called,
+              lookup(child),
+            ),
+            qualifier,
+            called,
           )
-        Error(_) -> None
+        }
+        Error(_) -> #(None, call.qualifier, call.name)
       }
       let declared = case entry {
         Some(e) -> e.params
@@ -2264,9 +2284,9 @@ fn signature_from_hover(
           |> result.unwrap(call.argument)
         Error(_) -> call.argument
       }
-      let name = case call.qualifier {
-        Ok(q) -> q <> "." <> call.name
-        Error(_) -> call.name
+      let name = case qualifier {
+        Ok(q) -> q <> "." <> called
+        Error(_) -> called
       }
       let head = name <> "("
       let #(parameters, _) =

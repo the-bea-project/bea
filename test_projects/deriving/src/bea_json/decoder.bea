@@ -8,7 +8,7 @@
 ////   Credentials(username: String, password: String)
 //// }
 ////
-//// credentials = decoder.from_json(body, credentials_decoder())?
+//// credentials = decoder.from_json(body, Credentials.decoder())?
 //// ```
 ////
 //// A derived decoder is a plain `decode.Decoder` from the standard

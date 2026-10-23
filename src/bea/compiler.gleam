@@ -1,5 +1,6 @@
 //// Compiles one Bea module to Gleam.
 
+import bea/associated
 import bea/ast
 import bea/codegen
 import bea/deriving
@@ -41,8 +42,10 @@ pub fn compile_module(
   ctx: codegen.Context,
 ) -> Result(Compiled, List(Diagnostic)) {
   let #(derived, derive_errors) = deriving.module(module, ctx)
-  let #(lowered, diagnostics) = lower.module(derived)
-  let diagnostics = list.append(derive_errors, diagnostics)
+  let #(resolved, associated_errors) = associated.module(derived, module)
+  let #(lowered, diagnostics) = lower.module(resolved)
+  let diagnostics =
+    list.flatten([derive_errors, associated_errors, diagnostics])
   let #(errors, warnings) = list.partition(diagnostics, diagnostic.is_error)
   case errors {
     [_, ..] -> Error(errors)

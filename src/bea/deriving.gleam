@@ -10,8 +10,9 @@
 //// }
 //// ```
 ////
-//// defines `credentials_decoder()`, exactly as if it had been written by
-//// hand:
+//// defines `credentials_decoder()` (which Bea code calls through the type,
+//// `Credentials.decoder()`: see `bea/associated`), exactly as if it had been
+//// written by hand:
 ////
 //// ```bea
 //// /// Derived by `@derive(decoder)` on `Credentials`.

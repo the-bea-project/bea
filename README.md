@@ -11,7 +11,8 @@ Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It c
 - updates with `|`: `User(user | name: "Bea")`, `%{scores | "bea": 1}`
 - automatic imports for the standard library (`list.map`, `Some`, `Dict`, ...)
 - `@derive(decoder)`: functions such as decoders written from a record's
-  fields by an ordinary library, not by the compiler
+  fields by an ordinary library, not by the compiler, and called through
+  their type: `Credentials.decoder()`
 - no macros, fully type safe
 
 ```bea
@@ -536,15 +537,17 @@ pub type Credentials {
 }
 
 pub def login(body: String) -> Result(String, json.DecodeError) {
-  Credentials(username:, ..) = decoder.from_json(body, credentials_decoder())?
+  Credentials(username:, ..) = decoder.from_json(body, Credentials.decoder())?
   Ok("welcome, #{username}")
 }
 ```
 
-`@derive(decoder)` on `Credentials` defines `credentials_decoder()`: the
-type's name and the deriver's (as imported, so `import x/decoder as json`
-gives `credentials_json()`). It is exactly the code you would write by hand,
-which `bea transpile` shows:
+`@derive(decoder)` on `Credentials` defines the function
+`credentials_decoder()`: the type's name and the deriver's (as imported, so
+`import x/decoder as json` gives `credentials_json()`), which Bea code
+reaches through the type as `Credentials.decoder()` (see [Functions through
+their type](#functions-through-their-type)). It is exactly the code you
+would write by hand, which `bea transpile` shows:
 
 ```gleam
 /// Derived by `@derive(decoder)` on `Credentials`.
@@ -632,6 +635,47 @@ encoding, and one for HTML forms written in Gleam.
 **For now** only records are derived (one constructor, labelled fields, not
 recursive); other types are reported, and their function can be written by
 hand. `@derive` goes on a `type`, and names imported modules.
+
+### Functions through their type
+
+A type's functions are named after it, `<type>_<name>`: what `@derive`
+defines (`credentials_decoder`), and what you write by hand for a type
+that can't be derived (`role_decoder` for a union). `Type.name` is that
+function, reached through the type:
+
+```bea
+import app/auth
+import app/users.{type User}
+
+Credentials.decoder()               // credentials_decoder(), of this module
+User.decoder()                      // users.user_decoder()
+users.Page.decoder(User.decoder())  // users.page_decoder(users.user_decoder())
+auth.Credentials.form()             // auth.credentials_form()
+Credentials.decoder                 // the function itself, as a value
+```
+
+Importing a type (`{type User}`, also `{type User as U}`) brings its
+functions along, whatever its module is called in the file; when the type
+was imported only for them, the Gleam doesn't import it. The type's name is
+written as it is, so `HTTPRequest.decoder()` needs no thought about how
+`http_request_decoder` is spelled.
+
+This is only naming. The Gleam is the same as with the name written out,
+so Gleam code and other packages call `credentials_decoder` as always, and
+both spellings work in Bea. It is not a method: `creds.encode()` would need
+the type of `creds`, which only Gleam's type checker knows, so functions
+belong to types, not to values. Bea reports what it can see:
+
+- `Credentials.encoder()` without the function in the module: *Unknown
+  function*, with the `@derive(encoder)` to add;
+- a constructor of another type (`Circle.area()`): *Not a type*, pointing
+  to `Shape.area`;
+- `String.length("x")`: *Unknown type*, pointing to `string.length`;
+- a variable called `credentials_decoder` (or one called like the type's
+  module) in scope: *Shadowed function*, since Gleam couldn't reach the
+  function past it.
+
+For types of other modules, Gleam checks that the function exists.
 
 ### Talking to Erlang and JavaScript
 
@@ -786,8 +830,8 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 ```text
 .bea ──lexer──▶ tokens ──parser──▶ AST ──deriving──▶ AST ──lower──▶ AST ──codegen──▶ .gleam + source map
                 (spans,            (Pratt,         (@derive          (cond, ?,         (pretty printer
-                 comments)          recovery)       → functions)      returns,          with marks)
-                                                                      clauses)
+                 comments)          recovery)       → functions,      returns,          with marks)
+                                                    Type.f → f)       clauses)
 ```
 
 | Module | Role |
@@ -796,6 +840,7 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/parser` | Recursive descent + precedence climbing (Gleam's table); error recovery per definition |
 | `bea/ast` | Syntax tree, every node has a span |
 | `bea/deriving` | `@derive(m)` on a record → ordinary functions calling the deriver module `m` |
+| `bea/associated` | `Type.name` → the function `<type>_<name>` it names (scope aware), in the module or through the type's import |
 | `bea/lower` | `cond` → `if`, `else` guards → `case`, `?` hoisting (tail-aware), early returns → guards/continuations, multi-clause → `case` |
 | `bea/codegen` | Gleam printer, scope-aware import planning, `let` vs `let assert` |
 | `bea/doc` | Wadler-style pretty printer that records source mappings |

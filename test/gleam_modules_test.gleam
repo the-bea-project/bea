@@ -111,8 +111,7 @@ fn fresh_project(name: String) -> project.Project {
   p
 }
 
-const generated =
-  "pub type GreetingRow {
+const generated = "pub type GreetingRow {
   GreetingRow(id: Int, text: String)
 }
 
@@ -124,8 +123,7 @@ pub fn find_greeting(db db: String, id id: Int) -> Result(List(GreetingRow), Str
 }
 "
 
-const app =
-  "import generated/sql/example_sql.{GreetingRow}
+const app = "import generated/sql/example_sql.{GreetingRow}
 
 pub def greeting() -> String {
   Ok([row]) = example_sql.find_greeting(db: \"dev.sqlite\", id: 1) else \"none\"

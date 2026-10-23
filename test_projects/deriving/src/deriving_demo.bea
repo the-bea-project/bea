@@ -4,7 +4,7 @@ import bea_json/decoder
 import bea_json/encoder
 import deriving_demo/auth
 import deriving_demo/orders
-import deriving_demo/users
+import deriving_demo/users.{type User}
 import form
 
 const user_json = `{"id": "u1", "age": 36, "active": true, "tags": ["admin", "ops"],
@@ -20,23 +20,23 @@ pub def main() {
     "credentials",
     decoder.from_json(
       `{"username": "admin", "password": "secret"}`,
-      auth.credentials_decoder(),
+      auth.Credentials.decoder(),
     ),
   )
   show(
     "wrong type",
     decoder.from_json(
       `{"username": "admin", "password": 42}`,
-      auth.credentials_decoder(),
+      auth.Credentials.decoder(),
     ),
   )
   show(
     "missing field",
-    decoder.from_json(`{"username": "admin"}`, auth.credentials_decoder()),
+    decoder.from_json(`{"username": "admin"}`, auth.Credentials.decoder()),
   )
   show(
     "invalid json",
-    decoder.from_json(`{"username": "admin",`, auth.credentials_decoder()),
+    decoder.from_json(`{"username": "admin",`, auth.Credentials.decoder()),
   )
   show("login", auth.login(`{"username": "admin", "password": "secret"}`))
   show(
@@ -49,29 +49,29 @@ pub def main() {
   // ... and from an HTML form, with the same type.
   show(
     "form",
-    form.from_body("username=admin&password=secret", auth.credentials_form()),
+    form.from_body("username=admin&password=secret", auth.Credentials.form()),
   )
   show(
     "form, blank fields",
-    form.from_body("username=+&other=1", auth.credentials_form()),
+    form.from_body("username=+&other=1", auth.Credentials.form()),
   )
 
   // Nested records, lists, Option (a missing key), Float from an integer.
-  Ok(user) = decoder.from_json(user_json, users.user_decoder()) else panic
+  Ok(user) = decoder.from_json(user_json, User.decoder()) else panic
   show("user", user)
   show(
     "user, nested error",
     decoder.from_json(
       `{"id": "u1", "age": 36, "active": true, "tags": [], "score": 1.5, "address": {"street": 5}}`,
-      users.user_decoder(),
+      User.decoder(),
     ),
   )
-  io.println("user as json: " <> encoder.to_string(user, users.user_encoder()))
+  io.println("user as json: " <> encoder.to_string(user, User.encoder()))
 
   // Generic types take the decoder of their parameter.
   page = decoder.from_json(
     `{"items": [` <> user_json <> `], "total": 1}`,
-    users.page_decoder(users.user_decoder()),
+    users.Page.decoder(User.decoder()),
   )
   show("page", page |> result.map(fn(p) { p.total }))
   io.println(
@@ -90,10 +90,11 @@ pub def main() {
     ),
   )
 
-  // Cross-module fields.
+  // Cross-module fields. `orders.Order.decoder()` is `orders.order_decoder()`,
+  // reached through the type; both spellings work.
   order = decoder.from_json(
     `{"id": 7, "customer": ` <> user_json <> `, "note": null}`,
-    orders.order_decoder(),
+    orders.Order.decoder(),
   )
   show("order", order |> result.map(fn(o) { (o.id, o.customer.id, o.note) }))
   Ok(order) = order else panic
@@ -111,13 +112,13 @@ pub def main() {
   // Derived decoders are standard library decoders.
   show(
     "decode.run",
-    decode.run(dynamic.string("x"), auth.credentials_decoder()),
+    decode.run(dynamic.string("x"), auth.Credentials.decoder()),
   )
   show(
     "json.parse + decode.list",
     json.parse(
       `[{"username": "a", "password": "b"}]`,
-      decode.list(auth.credentials_decoder()),
+      decode.list(auth.Credentials.decoder()),
     ),
   )
 }

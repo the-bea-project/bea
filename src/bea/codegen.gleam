@@ -555,7 +555,8 @@ pub fn derivers(attributes: List(ast.Attribute)) -> List(String) {
   })
 }
 
-fn bind(scope: Set(String), p: Pattern) -> Set(String) {
+/// `scope` with the variables `p` binds.
+pub fn bind(scope: Set(String), p: Pattern) -> Set(String) {
   case p {
     ast.PVar(_, n) -> set.insert(scope, n)
     ast.PAssign(_, inner, n) -> bind(set.insert(scope, n), inner)
@@ -697,6 +698,11 @@ fn u_expr(u: Usage, scope: Set(String), e: Expr) -> Usage {
       }
     ast.Constructor(_, None, n) -> add_unq(u, False, n)
     ast.Constructor(_, Some(m), n) -> add_member(u, m, n)
+    // `Credentials.decoder()` uses the type `Credentials` (see
+    // `bea/associated`), not its constructor.
+    ast.FieldAccess(_, ast.Constructor(_, None, t), _, _) -> add_unq(u, True, t)
+    ast.FieldAccess(_, ast.Constructor(_, Some(m), t), _, _) ->
+      add_member(u, m, t)
     ast.FieldAccess(_, ast.Var(_, m), field, _) ->
       case set.contains(scope, m) {
         True -> u

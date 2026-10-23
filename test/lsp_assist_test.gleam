@@ -248,3 +248,28 @@ pub def now() -> Int
   assert e.module == "my_ffi"
   assert assist.external_at(text, offset_after(text, "-> I")) == None
 }
+
+pub fn names_through_their_type_test() {
+  // `Type.name` is looked up as the function it is (see `bea/associated`).
+  let text =
+    "import app/users.{type User as U}
+
+pub type Credentials {
+  Credentials(username: String)
+}
+
+pub def go() {
+  (Credentials.decoder(), U.json(), auth.Session.encoder(), list.map)
+}
+"
+  let imports = assist.imports(text)
+  let at = fn(needle) {
+    let #(qualifier, name, start, _) =
+      repair.qualified_name_at(text, offset_after(text, needle))
+    assist.through_type(imports, text, qualifier, name, start)
+  }
+  assert at("Credentials.decoder") == #(Error(Nil), "credentials_decoder")
+  assert at("U.json") == #(Ok("users"), "user_json")
+  assert at("auth.Session.encoder") == #(Ok("auth"), "session_encoder")
+  assert at("list.map") == #(Ok("list"), "map")
+}

@@ -3,8 +3,10 @@
 //// parameter names, Bea style hovers, and `@external` targets.
 
 import bea/ast
+import bea/deriving
 import bea/lsp/index.{type Entry}
 import bea/lsp/json.{type Json}
+import bea/lsp/repair
 import bea/lsp/text
 import bea/parser
 import bea/span
@@ -37,6 +39,9 @@ pub type Imports {
     modules: Dict(String, String),
     /// Unqualified value imports -> module path.
     values: Dict(String, String),
+    /// Unqualified type imports: name used in code -> (module qualifier,
+    /// name in that module).
+    types: Dict(String, #(String, String)),
     /// The module's own syntax tree (possibly partial while it is edited).
     module: ast.Module,
   )
@@ -46,28 +51,72 @@ pub type Imports {
 /// before the error are still there.
 pub fn imports(source: String) -> Imports {
   let parsed = parser.parse_module(source).module
-  let #(modules, values) =
-    list.fold(parsed.items, #(dict.new(), dict.new()), fn(acc, item) {
-      case item {
-        ast.Import(module:, alias:, unqualified:, ..) -> {
-          let name = case alias {
-            Some(#(a, _)) -> a
-            None -> last_segment(module)
+  let #(modules, values, types) =
+    list.fold(
+      parsed.items,
+      #(dict.new(), dict.new(), dict.new()),
+      fn(acc, item) {
+        case item {
+          ast.Import(module:, alias:, unqualified:, ..) -> {
+            let name = case alias {
+              Some(#(a, _)) -> a
+              None -> last_segment(module)
+            }
+            let #(values, types) =
+              list.fold(unqualified, #(acc.1, acc.2), fn(acc, u) {
+                let used_as = option.unwrap(u.alias, u.name)
+                case u.is_type {
+                  True -> #(acc.0, dict.insert(acc.1, used_as, #(name, u.name)))
+                  False -> #(dict.insert(acc.0, used_as, module), acc.1)
+                }
+              })
+            #(dict.insert(acc.0, name, module), values, types)
           }
-          let values =
-            list.fold(unqualified, acc.1, fn(values, u) {
-              case u.is_type {
-                True -> values
-                False ->
-                  dict.insert(values, option.unwrap(u.alias, u.name), module)
-              }
-            })
-          #(dict.insert(acc.0, name, module), values)
+          _ -> acc
         }
-        _ -> acc
+      },
+    )
+  Imports(modules, values, types, parsed)
+}
+
+/// A name reached through its type (`Label.new`, `auth.Credentials.decoder`,
+/// see `bea/associated`) as the function it is: `#(Ok("labels"),
+/// "label_new")`, or no qualifier for a type of the module itself.
+/// `name_start` is where `name` starts in `text`. Other names are returned
+/// as they are.
+pub fn through_type(
+  imports: Imports,
+  text: String,
+  qualifier: Result(String, Nil),
+  name: String,
+  name_start: Int,
+) -> #(Result(String, Nil), String) {
+  case qualifier {
+    Ok(t) ->
+      case is_type_name(t) {
+        False -> #(qualifier, name)
+        True -> {
+          let type_start = name_start - 1 - string.byte_size(t)
+          let #(module, _, _, _) = repair.qualified_name_at(text, type_start)
+          case module, dict.get(imports.types, t) {
+            Ok(m), _ -> #(Ok(m), deriving.function_name(t, name))
+            Error(_), Ok(#(m, original)) -> #(
+              Ok(m),
+              deriving.function_name(original, name),
+            )
+            Error(_), Error(_) -> #(Error(Nil), deriving.function_name(t, name))
+          }
+        }
       }
-    })
-  Imports(modules, values, parsed)
+    Error(_) -> #(qualifier, name)
+  }
+}
+
+fn is_type_name(name: String) -> Bool {
+  case string.first(name) {
+    Ok(c) -> string.uppercase(c) == c && string.lowercase(c) != c
+    Error(_) -> False
+  }
 }
 
 /// The module a qualifier refers to: an import, or an automatically imported

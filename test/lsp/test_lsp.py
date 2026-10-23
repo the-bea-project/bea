@@ -76,6 +76,19 @@ pub def shout(word: String, times count: Int) -> String {
 }
 """
         )
+    # A function reached through its type: `Label.new(...)`.
+    with open(os.path.join(project, "src", "app", "labels.bea"), "w") as f:
+        f.write(
+            """pub type Label {
+  Label(text: String)
+}
+
+/// Makes a label.
+pub def label_new(text: String) -> Label {
+  Label(text)
+}
+"""
+        )
     # FFI
     with open(os.path.join(project, "src", "app", "native.bea"), "w") as f:
         f.write(
@@ -163,6 +176,26 @@ pub def main() {
     definition = client.request("textDocument/definition", {"textDocument": {"uri": doc["uri"]}, "position": pos2})
     d = json.dumps(definition)
     check("definition into .gleam module maps to src/", "/src/app/helper.gleam" in d and ".beabuild" not in d, d)
+
+    # `Label.new` is `labels.label_new`: hover and definition follow it.
+    label_text = text.replace("import app/helper\n", "import app/helper\nimport app/labels.{type Label}\n").replace(
+        "  n = maths.square(4)\n", "  n = maths.square(4)\n  l = Label.new(\"x\")\n"
+    )
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 50}, "contentChanges": [{"text": label_text}]},
+    )
+    lpos = position_of(label_text, "Label.new", 6)
+    hover = client.request("textDocument/hover", {"textDocument": {"uri": doc["uri"]}, "position": lpos})
+    contents = json.dumps(hover)
+    check("hover on Type.function shows the function", "Makes a label" in contents and "labels.label_new(text: String) -> labels.Label" in contents, contents)
+    definition = client.request("textDocument/definition", {"textDocument": {"uri": doc["uri"]}, "position": lpos})
+    d = json.dumps(definition)
+    check("definition of Type.function points into its module", "labels.bea" in d and ".beabuild" not in d, d)
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 51}, "contentChanges": [{"text": text}]},
+    )
 
     # A type error reported by Gleam, mapped onto the Bea source.
     broken = text.replace("n = maths.square(4)", 'n = maths.square("four")')
@@ -367,6 +400,13 @@ pub def main() {
     # A dependency function, with its parameter names from the package source.
     sig = signature(text.replace("n = maths.square(4)", 'n = string.pad_start("a", '), 'string.pad_start("a", ', 28)
     check("signature help for a dependency has parameter names", sig and "desired_length" in sig["signatures"][0]["label"], json.dumps(sig))
+    # A function reached through its type.
+    sig = signature(
+        text.replace("n = maths.square(4)", 'n = Label.new(').replace("import app/helper\n", "import app/helper\nimport app/labels.{type Label}\n"),
+        "Label.new(",
+        28,
+    )
+    check("signature help for Type.function", sig and sig["signatures"][0]["label"] == "labels.label_new(text: String) -> labels.Label", json.dumps(sig))
     # Locals and functions inside control flow. Bea lowers these to Gleam
     # code of a different shape (`bool.guard`, `use ... <- result.try`, case
     # on booleans), which used to send the cursor to the wrong Gleam token.
