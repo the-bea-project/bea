@@ -1,0 +1,21 @@
+credentials: Ok(Credentials(username: "admin", password: "secret"))
+wrong type: Error(UnableToDecode([DecodeError(expected: "String", found: "Int", path: ["password"])]))
+missing field: Error(UnableToDecode([DecodeError(expected: "Field", found: "Nothing", path: ["password"])]))
+invalid json: Error(UnexpectedByte(""))
+login: Ok("welcome, admin")
+login, wrong password: Error(WrongPassword)
+login, bad json: Error(BadJson(UnableToDecode([DecodeError(expected: "String", found: "Bool", path: ["username"]), DecodeError(expected: "Field", found: "Nothing", path: ["password"])])))
+? propagation: Error(UnableToDecode([DecodeError(expected: "Field", found: "Nothing", path: ["username"])]))
+form: Ok(Credentials(username: "admin", password: "secret"))
+form, blank fields: Error([Missing(field: "username"), Missing(field: "password")])
+user: User(id: "u1", age: 36, active: True, tags: ["admin", "ops"], score: 4, address: Address(street: "1 Hive Lane", city: "Kanpur", zip: None))
+user, nested error: Error(UnableToDecode([DecodeError(expected: "String", found: "Int", path: ["address", "street"]), DecodeError(expected: "Field", found: "Nothing", path: ["address", "city"])]))
+user as json: {"id":"u1","age":36,"active":true,"tags":["admin","ops"],"score":4,"address":{"street":"1 Hive Lane","city":"Kanpur","zip":null}}
+page: Ok(1)
+page of ints as json: {"items":[1,2],"total":2}
+product: Ok(Product(name: "honey", price: Price(cents: 450), stock: dict.from_list([#("kanpur", 3)])))
+order: Ok(#(7, "u1", None))
+order as json: {"id":7,"customer":{"id":"u1","age":36,"active":true,"tags":["admin","ops"],"score":4,"address":{"street":"1 Hive Lane","city":"Kanpur","zip":null}},"note":null}
+cart: Ok(Cart(lines: [Product(name: "wax", price: Price(cents: 120), stock: dict.from_list([]))]))
+decode.run: Error([DecodeError(expected: "Dict", found: "String", path: []), DecodeError(expected: "Dict", found: "String", path: [])])
+json.parse + decode.list: Ok([Credentials(username: "a", password: "b")])

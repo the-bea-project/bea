@@ -11,6 +11,8 @@
 //// It also finds the Erlang / JavaScript functions behind `@external`s.
 
 import bea/ast
+import bea/codegen
+import bea/deriving
 import bea/formatter
 import bea/lsp/text
 import bea/project.{type Project}
@@ -52,6 +54,8 @@ pub type Index =
 // --- Bea modules -------------------------------------------------------------------
 
 pub fn from_bea(module: String, parsed: ast.Module) -> List(Entry) {
+  // With the functions `@derive` defines.
+  let #(parsed, _) = deriving.module(parsed, codegen.empty_context())
   list.flat_map(parsed.items, fn(item) {
     case item {
       ast.Function(name:, clauses:, ..) ->

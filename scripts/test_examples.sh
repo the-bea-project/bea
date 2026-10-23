@@ -5,6 +5,8 @@
 #      matching .expected file.
 #   2. Every exercism program in beacode/ must build and run.
 #   3. Formatting every .bea file must succeed and be idempotent.
+#   4. test_projects/deriving (`@derive` with JSON and form derivers) builds
+#      without warnings and its output matches, on Erlang and JavaScript.
 #
 # Usage: scripts/test_examples.sh   (needs `bea` and `gleam` on the PATH;
 #        BEA overrides the bea command, e.g. BEA="gleam run --")
@@ -76,6 +78,34 @@ for f in test/fixtures/*.bea; do
     fail "formatted fixture $name"
   fi
 done
+
+# --- 4. @derive ------------------------------------------------------------------
+cp -r test_projects/deriving "$WORK/deriving"
+rm -rf "$WORK/deriving/.beabuild" "$WORK/deriving/manifest.toml"
+if (cd "$WORK/deriving" && $BEA build --warnings-as-errors >"$WORK/build.log" 2>&1); then
+  pass "deriving project builds without warnings"
+else
+  fail "deriving project builds without warnings"; cat "$WORK/build.log"
+fi
+actual=$(cd "$WORK/deriving" && $BEA run 2>/dev/null)
+if diff <(echo "$actual") test_projects/deriving/expected_erlang.txt >"$WORK/diff" 2>&1; then
+  pass "deriving project (Erlang)"
+else
+  fail "deriving project (Erlang)"; head -20 "$WORK/diff"
+fi
+if command -v node >/dev/null 2>&1; then
+  actual=$(cd "$WORK/deriving" && $BEA run --target javascript 2>/dev/null)
+  if diff <(echo "$actual") test_projects/deriving/expected_javascript.txt >"$WORK/diff" 2>&1; then
+    pass "deriving project (JavaScript)"
+  else
+    fail "deriving project (JavaScript)"; head -20 "$WORK/diff"
+  fi
+fi
+if $BEA format --check "$WORK/deriving/src" >"$WORK/format.log" 2>&1; then
+  pass "deriving project is formatted"
+else
+  fail "deriving project is formatted"; cat "$WORK/format.log"
+fi
 
 echo
 if [ "$failures" -eq 0 ]; then echo "All end-to-end tests passed"; else echo "$failures test(s) failed"; exit 1; fi

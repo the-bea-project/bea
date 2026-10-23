@@ -24,6 +24,7 @@
 import bea/ast
 import bea/codegen
 import bea/compiler
+import bea/deriving
 import bea/diagnostic.{type Diagnostic}
 import bea/sourcemap.{type SourceMap}
 import bea/span
@@ -373,6 +374,18 @@ pub fn sync_cached(
         case p.3 {
           Ok(m) ->
             dict.insert(acc, p.1, codegen.exported_single_constructors(m))
+          Error(_) -> acc
+        }
+      }),
+      derived: list.fold(parsed, dict.new(), fn(acc, p) {
+        case p.3 {
+          Ok(m) -> dict.insert(acc, p.1, deriving.exports(m))
+          Error(_) -> acc
+        }
+      }),
+      aliases: list.fold(parsed, dict.new(), fn(acc, p) {
+        case p.3 {
+          Ok(m) -> dict.insert(acc, p.1, deriving.portable_aliases(m))
           Error(_) -> acc
         }
       }),

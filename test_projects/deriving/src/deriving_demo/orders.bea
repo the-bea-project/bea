@@ -1,0 +1,16 @@
+//// Fields whose types come from another module of the project use that
+//// module's derived functions: `users.user_decoder()`.
+
+import bea_json/decoder
+import bea_json/encoder
+import deriving_demo/users.{type User}
+
+@derive(decoder, encoder)
+pub type Order {
+  Order(id: Int, customer: User, note: Option(String))
+}
+
+@derive(decoder)
+pub type Cart {
+  Cart(lines: List(users.Product))
+}

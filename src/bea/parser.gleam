@@ -262,7 +262,7 @@ fn attributes(ts: Tokens, acc: List(Attribute)) -> Parsed(List(Attribute)) {
 
 fn attribute_arg(ts: Tokens) -> Parsed(ast.AttributeArg) {
   case ts {
-    [Token(lexer.Name(n), _, _), ..rest] -> Ok(#(ast.AttrName(n), rest))
+    [Token(lexer.Name(n), s, _), ..rest] -> Ok(#(ast.AttrName(n, s), rest))
     [Token(lexer.Str([lexer.StrText(raw, _)]), _, _), ..rest] ->
       Ok(#(ast.AttrString(raw), rest))
     [Token(lexer.Str([]), _, _), ..rest] -> Ok(#(ast.AttrString(""), rest))
@@ -1946,15 +1946,20 @@ fn collapse_clauses(items: List(Item)) -> List(Item) {
 }
 
 /// Words Gleam reserves that Bea doesn't use itself: they'd produce invalid
-/// Gleam if used as names.
+/// Gleam if used as names. The exception is the attribute `@derive`, which
+/// Bea consumes (see `bea/deriving`).
 const gleam_reserved = [
   "auto", "delegate", "derive", "implement", "let", "macro", "test",
 ]
 
 fn reserved_words(tokens: List(Token)) -> List(Diagnostic) {
-  list.filter_map(tokens, fn(t) {
-    case t.kind {
-      lexer.Name(n) ->
+  let previous = [lexer.Eof, ..list.map(tokens, fn(t) { t.kind })]
+  list.zip(previous, tokens)
+  |> list.filter_map(fn(pair) {
+    let #(before, t) = pair
+    case t.kind, before {
+      lexer.Name("derive"), lexer.At -> Error(Nil)
+      lexer.Name(n), _ ->
         case list.contains(gleam_reserved, n) && n != "let" {
           True ->
             Ok(diagnostic.error(
@@ -1964,7 +1969,7 @@ fn reserved_words(tokens: List(Token)) -> List(Diagnostic) {
             ))
           False -> Error(Nil)
         }
-      _ -> Error(Nil)
+      _, _ -> Error(Nil)
     }
   })
 }

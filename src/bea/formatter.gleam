@@ -774,7 +774,7 @@ fn attributes(attrs: List(ast.Attribute)) -> Doc {
           <> string.join(
             list.map(args, fn(arg) {
               case arg {
-                ast.AttrName(n) -> n
+                ast.AttrName(n, _) -> n
                 ast.AttrString(s) -> "\"" <> s <> "\""
               }
             }),

@@ -1,0 +1,123 @@
+import gleam/json
+
+import bea_json/decoder
+import bea_json/encoder
+import deriving_demo/auth
+import deriving_demo/orders
+import deriving_demo/users
+import form
+
+const user_json = `{"id": "u1", "age": 36, "active": true, "tags": ["admin", "ops"],
+  "score": 4, "address": {"street": "1 Hive Lane", "city": "Kanpur"}}`
+
+def show(label: String, value: a) {
+  io.println(label <> ": " <> string.inspect(value))
+}
+
+pub def main() {
+  // The Beahive login, from JSON.
+  show(
+    "credentials",
+    decoder.from_json(
+      `{"username": "admin", "password": "secret"}`,
+      auth.credentials_decoder(),
+    ),
+  )
+  show(
+    "wrong type",
+    decoder.from_json(
+      `{"username": "admin", "password": 42}`,
+      auth.credentials_decoder(),
+    ),
+  )
+  show(
+    "missing field",
+    decoder.from_json(`{"username": "admin"}`, auth.credentials_decoder()),
+  )
+  show(
+    "invalid json",
+    decoder.from_json(`{"username": "admin",`, auth.credentials_decoder()),
+  )
+  show("login", auth.login(`{"username": "admin", "password": "secret"}`))
+  show(
+    "login, wrong password",
+    auth.login(`{"username": "admin", "password": "x"}`),
+  )
+  show("login, bad json", auth.login(`{"username": true}`))
+  show("? propagation", auth.username(`{"password": "secret"}`))
+
+  // ... and from an HTML form, with the same type.
+  show(
+    "form",
+    form.from_body("username=admin&password=secret", auth.credentials_form()),
+  )
+  show(
+    "form, blank fields",
+    form.from_body("username=+&other=1", auth.credentials_form()),
+  )
+
+  // Nested records, lists, Option (a missing key), Float from an integer.
+  Ok(user) = decoder.from_json(user_json, users.user_decoder()) else panic
+  show("user", user)
+  show(
+    "user, nested error",
+    decoder.from_json(
+      `{"id": "u1", "age": 36, "active": true, "tags": [], "score": 1.5, "address": {"street": 5}}`,
+      users.user_decoder(),
+    ),
+  )
+  io.println("user as json: " <> encoder.to_string(user, users.user_encoder()))
+
+  // Generic types take the decoder of their parameter.
+  page = decoder.from_json(
+    `{"items": [` <> user_json <> `], "total": 1}`,
+    users.page_decoder(users.user_decoder()),
+  )
+  show("page", page |> result.map(fn(p) { p.total }))
+  io.println(
+    "page of ints as json: " <> encoder.to_string(
+      users.Page([1, 2], 2),
+      users.page_encoder(encoder.int()),
+    ),
+  )
+
+  // Phantom parameters and dictionaries.
+  show(
+    "product",
+    decoder.from_json(
+      `{"name": "honey", "price": {"cents": 450}, "stock": {"kanpur": 3}}`,
+      users.product_decoder(),
+    ),
+  )
+
+  // Cross-module fields.
+  order = decoder.from_json(
+    `{"id": 7, "customer": ` <> user_json <> `, "note": null}`,
+    orders.order_decoder(),
+  )
+  show("order", order |> result.map(fn(o) { (o.id, o.customer.id, o.note) }))
+  Ok(order) = order else panic
+  io.println(
+    "order as json: " <> encoder.to_string(order, orders.order_encoder()),
+  )
+  show(
+    "cart",
+    decoder.from_json(
+      `{"lines": [{"name": "wax", "price": {"cents": 120}, "stock": {}}]}`,
+      orders.cart_decoder(),
+    ),
+  )
+
+  // Derived decoders are standard library decoders.
+  show(
+    "decode.run",
+    decode.run(dynamic.string("x"), auth.credentials_decoder()),
+  )
+  show(
+    "json.parse + decode.list",
+    json.parse(
+      `[{"username": "a", "password": "b"}]`,
+      decode.list(auth.credentials_decoder()),
+    ),
+  )
+}

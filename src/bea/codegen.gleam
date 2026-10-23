@@ -33,11 +33,36 @@ pub type Context {
     /// by tools), keyed by module path. Used to emit `let` instead of `let
     /// assert` for patterns that can't fail.
     single_constructors: Dict(String, Set(String)),
+    /// The functions `@derive` defines in the project's Bea modules, keyed
+    /// by module path (every Bea module has an entry, maybe empty), so a
+    /// derived function can call the one of a field's type (see
+    /// `bea/derive`).
+    derived: Dict(String, List(Derived)),
+    /// Type aliases of the project's Bea modules that mean the same in any
+    /// module (they only name the prelude and the standard library), so a
+    /// derived function can see through them: module path -> name ->
+    /// (parameters, aliased type).
+    aliases: Dict(String, Dict(String, #(List(String), ast.Type))),
+  )
+}
+
+/// A function defined by `@derive` that other modules can call.
+pub type Derived {
+  Derived(
+    type_name: String,
+    /// Module path of the deriver.
+    deriver: String,
+    function: String,
+    /// For each type parameter, whether the function takes an argument for
+    /// it.
+    capabilities: List(Bool),
+    /// False for an opaque type: its derived functions are private.
+    public: Bool,
   )
 }
 
 pub fn empty_context() -> Context {
-  Context(dict.new())
+  Context(dict.new(), dict.new(), dict.new())
 }
 
 pub type Output {
@@ -500,12 +525,32 @@ fn collect(module: ast.Module) -> Usage {
         })
       ast.Const(annotation:, value:, ..) ->
         u_type_opt(u, annotation) |> u_expr(set.new(), value)
-      ast.CustomType(variants:, ..) ->
+      ast.CustomType(variants:, attributes:, ..) ->
         list.fold(variants, u, fn(u, v) {
           list.fold(v.fields, u, fn(u, f) { u_type(u, f.type_) })
         })
+        // `@derive(decoder)` uses the module `decoder`.
+        |> list.fold(derivers(attributes), _, fn(u, m) {
+          Usage(..u, modules: set.insert(u.modules, m))
+        })
       ast.TypeAlias(aliased:, ..) -> u_type(u, aliased)
       _ -> u
+    }
+  })
+}
+
+/// The modules named by `@derive(...)` attributes.
+pub fn derivers(attributes: List(ast.Attribute)) -> List(String) {
+  list.flat_map(attributes, fn(a) {
+    case a.name {
+      "derive" ->
+        list.filter_map(a.args, fn(arg) {
+          case arg {
+            ast.AttrName(n, _) -> Ok(n)
+            ast.AttrString(_) -> Error(Nil)
+          }
+        })
+      _ -> []
     }
   })
 }
@@ -862,7 +907,7 @@ fn attributes(attrs: List(ast.Attribute)) -> Doc {
             "(",
             list.map(args, fn(arg) {
               case arg {
-                ast.AttrName(n) -> t(n)
+                ast.AttrName(n, _) -> t(n)
                 ast.AttrString(s) -> t("\"" <> s <> "\"")
               }
             }),

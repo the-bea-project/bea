@@ -1,0 +1,21 @@
+credentials: Ok(Credentials("admin", "secret"))
+wrong type: Error(UnableToDecode([DecodeError("String", "Int", ["password"])]))
+missing field: Error(UnableToDecode([DecodeError("Field", "Nothing", ["password"])]))
+invalid json: Error(UnexpectedEndOfInput)
+login: Ok("welcome, admin")
+login, wrong password: Error(WrongPassword)
+login, bad json: Error(BadJson(UnableToDecode([DecodeError("String", "Bool", ["username"]), DecodeError("Field", "Nothing", ["password"])])))
+? propagation: Error(UnableToDecode([DecodeError("Field", "Nothing", ["username"])]))
+form: Ok(Credentials("admin", "secret"))
+form, blank fields: Error([Missing("username"), Missing("password")])
+user: User("u1", 36, True, ["admin", "ops"], 4.0, Address("1 Hive Lane", "Kanpur", None))
+user, nested error: Error(UnableToDecode([DecodeError("String", "Int", ["address", "street"]), DecodeError("Field", "Nothing", ["address", "city"])]))
+user as json: {"id":"u1","age":36,"active":true,"tags":["admin","ops"],"score":4.0,"address":{"street":"1 Hive Lane","city":"Kanpur","zip":null}}
+page: Ok(1)
+page of ints as json: {"items":[1,2],"total":2}
+product: Ok(Product("honey", Price(450), dict.from_list([#("kanpur", 3)])))
+order: Ok(#(7, "u1", None))
+order as json: {"id":7,"customer":{"id":"u1","age":36,"active":true,"tags":["admin","ops"],"score":4.0,"address":{"street":"1 Hive Lane","city":"Kanpur","zip":null}},"note":null}
+cart: Ok(Cart([Product("wax", Price(120), dict.from_list([]))]))
+decode.run: Error([DecodeError("Dict", "String", []), DecodeError("Dict", "String", [])])
+json.parse + decode.list: Ok([Credentials("a", "b")])

@@ -1,0 +1,38 @@
+import bea_json/decoder
+import bea_json/encoder
+
+@derive(decoder, encoder)
+pub type Address {
+  Address(street: String, city: String, zip: Option(String))
+}
+
+@derive(decoder, encoder)
+pub type User {
+  User(
+    id: String,
+    age: Int,
+    active: Bool,
+    tags: List(String),
+    score: Float,
+    address: Address,
+  )
+}
+
+/// Generic: `page_decoder(item_decoder)`.
+@derive(decoder, encoder)
+pub type Page(item) {
+  Page(items: List(item), total: Int)
+}
+
+/// A phantom parameter needs no decoder: `price_decoder()`.
+@derive(decoder)
+pub type Price(currency) {
+  Price(cents: Int)
+}
+
+pub type Eur
+
+@derive(decoder)
+pub type Product {
+  Product(name: String, price: Price(Eur), stock: Dict(String, Int))
+}

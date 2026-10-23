@@ -2,6 +2,7 @@
 
 import bea/ast
 import bea/codegen
+import bea/deriving
 import bea/diagnostic.{type Diagnostic}
 import bea/doc
 import bea/lower
@@ -39,7 +40,9 @@ pub fn compile_module(
   module: ast.Module,
   ctx: codegen.Context,
 ) -> Result(Compiled, List(Diagnostic)) {
-  let #(lowered, diagnostics) = lower.module(module)
+  let #(derived, derive_errors) = deriving.module(module, ctx)
+  let #(lowered, diagnostics) = lower.module(derived)
+  let diagnostics = list.append(derive_errors, diagnostics)
   let #(errors, warnings) = list.partition(diagnostics, diagnostic.is_error)
   case errors {
     [_, ..] -> Error(errors)

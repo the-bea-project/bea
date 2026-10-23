@@ -10,6 +10,8 @@ Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It c
 - `(a, b)` tuples, `%{"k": v}` maps, `[head | tail]` lists
 - updates with `|`: `User(user | name: "Bea")`, `%{scores | "bea": 1}`
 - automatic imports for the standard library (`list.map`, `Some`, `Dict`, ...)
+- `@derive(decoder)`: functions such as decoders written from a record's
+  fields by an ordinary library, not by the compiler
 - no macros, fully type safe
 
 ```bea
@@ -517,6 +519,120 @@ pub type Scores = Dict(String, Int)
 pub const max_players: Int = 4
 ```
 
+### Deriving functions: `@derive`
+
+Decoders, encoders, form readers and the like follow the fields of a record
+one by one. `@derive` writes those functions for you, from the type, with a
+*deriver*: an ordinary module (Bea or Gleam) that decides what the function
+does. The compiler knows no deriver and no format.
+
+```bea
+import gleam/json
+import my_json/decoder          // a deriver: JSON decoding
+
+@derive(decoder)
+pub type Credentials {
+  Credentials(username: String, password: String)
+}
+
+pub def login(body: String) -> Result(String, json.DecodeError) {
+  Credentials(username:, ..) = decoder.from_json(body, credentials_decoder())?
+  Ok("welcome, #{username}")
+}
+```
+
+`@derive(decoder)` on `Credentials` defines `credentials_decoder()`: the
+type's name and the deriver's (as imported, so `import x/decoder as json`
+gives `credentials_json()`). It is exactly the code you would write by hand,
+which `bea transpile` shows:
+
+```gleam
+/// Derived by `@derive(decoder)` on `Credentials`.
+pub fn credentials_decoder() {
+  use <- decoder.record("Credentials")
+  use username <- decoder.field(
+    "username",
+    decoder.string(),
+    fn(value: Credentials) { value.username },
+  )
+  use password <- decoder.field(
+    "password",
+    decoder.string(),
+    fn(value: Credentials) { value.password },
+  )
+  decoder.done(Credentials(username: username, password: password))
+}
+```
+
+You get only what you ask for: `@derive(decoder, encoder)` for both, and
+credentials that should never be serialised simply don't derive an
+encoder. The functions are as public as the type's constructor (private for
+an opaque type), and appear right after the type.
+
+**Field types.** A field's part (`decoder.string()` above) comes from its
+type:
+
+- a type parameter: an argument of the function, so `Page(item)` gives
+  `page_decoder(item_decoder)` (parameters only phantom types use take
+  none);
+- a type of the module, or of another Bea module of the project: that
+  module's `<type>_<deriver>`, derived (`users.user_decoder()`) or written
+  by hand, which is how a union, a recursive or an external type joins in;
+- a type alias: what it stands for (for another module's alias, when it
+  only names the prelude and the standard library: `pub type Id = String`);
+- any other type: the deriver's own, named after it: `decoder.int()`,
+  `decoder.list(decoder.string())`, `decoder.option(...)`,
+  `decoder.dict(k, v)`, `decoder.timestamp()`. If the deriver has none,
+  Gleam says so on the field:
+
+```text
+error: Unknown module value
+  ┌─ src/app/events.bea:6:27
+  │
+6 │   Event(name: String, at: Timestamp)
+  │                           ^^^^^^^^^
+
+The module `my_json/decoder` does not have a `timestamp` value.
+```
+
+**Writing a deriver.** A deriver exports `record`, `field` and `done`, and
+a function per type it supports. The derived function reads, with `use`:
+`record(constructor_name, fields)` makes the result from the fields (a
+function, called when the deriver wants); `field(label, part, get, next)`
+handles one field — `get` reads it from a record, `next` continues with its
+value; `done(record)` ends the fields. Decoders use `next`, encoders `get`;
+everything else (names, missing fields, `null`, numbers, errors, what
+`record` returns) is the deriver's choice:
+
+```bea
+//// my_json/decoder.bea: derived decoders are standard `decode.Decoder`s.
+import gleam/dynamic/decode.{type Decoder}
+
+pub def record(_name: String, fields: fn() -> Decoder(r)) -> Decoder(r) {
+  fields()
+}
+
+pub def field(label: String, of: Decoder(a), _get: fn(r) -> a, next: fn(a) -> Decoder(r)) -> Decoder(r) {
+  decode.field(label, of, next)
+}
+
+pub def done(value: r) -> Decoder(r) {
+  decode.success(value)
+}
+
+pub def string() -> Decoder(String) {
+  decode.string
+}
+// int, float, bool, list, option, dict...
+```
+
+`test_projects/deriving` has complete derivers for JSON decoding and
+encoding, and one for HTML forms written in Gleam.
+
+**For now** only records are derived (one constructor, labelled fields, not
+recursive); other types are reported, and their function can be written by
+hand. `@derive` goes on a `type`, and names imported modules.
+
 ### Talking to Erlang and JavaScript
 
 ```bea
@@ -668,10 +784,10 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 ## How it works
 
 ```text
-.bea ──lexer──▶ tokens ──parser──▶ AST ──lower──▶ AST ──codegen──▶ .gleam + source map
-                (spans,            (Pratt,         (cond, ?,         (pretty printer
-                 comments)          recovery)       returns,          with marks)
-                                                    clauses)
+.bea ──lexer──▶ tokens ──parser──▶ AST ──deriving──▶ AST ──lower──▶ AST ──codegen──▶ .gleam + source map
+                (spans,            (Pratt,         (@derive          (cond, ?,         (pretty printer
+                 comments)          recovery)       → functions)      returns,          with marks)
+                                                                      clauses)
 ```
 
 | Module | Role |
@@ -679,6 +795,7 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/lexer` | Byte-based lexer with exact spans; keeps comments; string interpolation |
 | `bea/parser` | Recursive descent + precedence climbing (Gleam's table); error recovery per definition |
 | `bea/ast` | Syntax tree, every node has a span |
+| `bea/deriving` | `@derive(m)` on a record → ordinary functions calling the deriver module `m` |
 | `bea/lower` | `cond` → `if`, `else` guards → `case`, `?` hoisting (tail-aware), early returns → guards/continuations, multi-clause → `case` |
 | `bea/codegen` | Gleam printer, scope-aware import planning, `let` vs `let assert` |
 | `bea/doc` | Wadler-style pretty printer that records source mappings |

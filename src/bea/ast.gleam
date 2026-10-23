@@ -17,12 +17,13 @@ pub type Publicity {
 
 /// `@name(arg, arg)` — passed through to Gleam untouched, e.g.
 /// `@external(erlang, "lists", "reverse")` or `@deprecated("use x")`.
+/// The exception is `@derive(...)` on a type, which `bea/deriving` expands.
 pub type Attribute {
   Attribute(span: Span, name: String, args: List(AttributeArg))
 }
 
 pub type AttributeArg {
-  AttrName(String)
+  AttrName(name: String, span: Span)
   AttrString(String)
 }
 

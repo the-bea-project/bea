@@ -1,0 +1,33 @@
+//// The Beahive login: credentials come in as JSON or from an HTML form,
+//// and never go out, so they get decoders and no encoder.
+
+import gleam/json
+
+import bea_json/decoder
+import form
+
+@derive(decoder, form)
+pub type Credentials {
+  Credentials(username: String, password: String)
+}
+
+pub type LoginError {
+  BadJson(json.DecodeError)
+  WrongPassword
+}
+
+/// `?` propagates the decoding error; `else` turns it into ours.
+pub def login(body: String) -> Result(String, LoginError) {
+  Credentials(username:, password:) = decoder.from_json(
+    body,
+    credentials_decoder(),
+  )? else e -> Error(BadJson(e))
+  password == "secret" else Error(WrongPassword)
+  Ok("welcome, #{username}")
+}
+
+/// The same with plain `?`, for a function returning the library's error.
+pub def username(body: String) -> Result(String, json.DecodeError) {
+  credentials = decoder.from_json(body, credentials_decoder())?
+  Ok(credentials.username)
+}
