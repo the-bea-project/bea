@@ -1,0 +1,7 @@
+pub type Box(value: a)
+
+pub type Point(x: Float) {
+  Point(x: Float)
+}
+
+pub type Fine(x: Int)

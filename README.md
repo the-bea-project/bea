@@ -278,9 +278,10 @@ Bea projects depend on Gleam packages the same way. Fill in `description`,
 
 ### Building a standalone `bea` binary
 
-The CLI is a normal Gleam program (`bea.main`). Package it with gleepack, or
-with `gleam export erlang-shipment`. For development, `scripts/bea` runs the
-CLI straight from this checkout after `gleam build`.
+The CLI is a normal Gleam program (`bea.main`), generated from its Bea
+sources (see [Development](#development)). Package it with gleepack, or with
+`gleam export erlang-shipment`. For development, `scripts/bea` runs the CLI
+straight from this checkout after `scripts/bootstrap.sh`.
 
 Ctrl+C works with both: `scripts/bea` starts the VM with `+Bi` and turns
 SIGINT into a SIGTERM, and gleepack's runtime does that conversion itself.
@@ -857,6 +858,12 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
                                                     Type.f → f)       clauses)
 ```
 
+The compiler is written in Bea: its modules are in `compiler/src/`, and a
+trusted seed (the last all-Gleam version, pinned in git) compiles them the
+first time, after which the compiler builds itself.
+[docs/self-hosting.md](docs/self-hosting.md) describes the bootstrap, how
+to work on the compiler and how to recover when it can't build itself.
+
 | Module | Role |
 | --- | --- |
 | `bea/lexer` | Byte-based lexer with exact spans; keeps comments; string interpolation |
@@ -883,13 +890,20 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 
 ## Development
 
+The compiler's sources are in `compiler/src`. `src/` is generated from them
+and isn't committed: build it first. [docs/self-hosting.md](docs/self-hosting.md)
+explains how the compiler is built, from a trusted seed, and how to recover
+when it can't build itself.
+
 ```sh
+scripts/bootstrap.sh            # build the compiler: seed A -> B -> C, installs src/
 gleam test                      # unit tests
-gleam build && export PATH=$PWD/scripts:$PATH
+export PATH=$PWD/scripts:$PATH
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
 scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code (BEA_TEST_MARMOT=1: also Marmot)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
+scripts/verify_bootstrap.sh     # the self-hosted compilers behave like the trusted one
 ```
 
 `beacode/` holds Bea solutions to the Gleam exercism track; `test/fixtures/`

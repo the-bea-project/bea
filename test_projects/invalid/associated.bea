@@ -1,0 +1,16 @@
+pub type Shape {
+  Circle(r: Float)
+}
+
+pub def shape_area(s: Shape) -> Float {
+  case s {
+    Circle(r) -> r *. r
+  }
+}
+
+pub def main() {
+  a = Shape.perimeter(Circle(1.0))
+  b = Circle.area(Circle(1.0))
+  c = String.length("x")
+  (a, b, c)
+}

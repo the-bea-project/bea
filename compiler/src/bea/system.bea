@@ -1,0 +1,109 @@
+//// Thin wrappers over the Erlang FFI in `bea_ffi.erl`: processes, terminal
+//// and environment access.
+
+import gleam/list
+import gleam/result
+import gleam/string
+
+@external(erlang, "bea_ffi", "init")
+pub def init() -> Nil
+
+@external(erlang, "bea_ffi", "find_executable")
+pub def find_executable(name: String) -> Result(String, Nil)
+
+@external(erlang, "bea_ffi", "get_env")
+pub def get_env(name: String) -> Result(String, Nil)
+
+@external(erlang, "bea_ffi", "cwd")
+pub def cwd() -> String
+
+@external(erlang, "bea_ffi", "absolute_path")
+pub def absolute_path(path: String) -> String
+
+@external(erlang, "bea_ffi", "halt")
+pub def halt(code: Int) -> Nil
+
+@external(erlang, "bea_ffi", "print_stderr")
+pub def print_stderr(text: String) -> Nil
+
+@external(erlang, "bea_ffi", "print")
+pub def print(text: String) -> Nil
+
+@external(erlang, "bea_ffi", "is_tty")
+pub def is_tty() -> Bool
+
+@external(erlang, "bea_ffi", "read_stdin_all")
+pub def read_stdin() -> String
+
+@external(erlang, "bea_ffi", "monotonic_ms")
+pub def monotonic_ms() -> Int
+
+/// If a child program was stopped because Bea received SIGTERM/SIGHUP (the
+/// launcher turns Ctrl+C into SIGTERM), the exit code Bea should use.
+@external(erlang, "bea_ffi", "was_interrupted")
+pub def was_interrupted() -> Result(Int, Nil)
+
+/// For the language server: its children are helpers, so a SIGTERM stops
+/// Bea right away instead of being forwarded to them.
+@external(erlang, "bea_ffi", "no_foreground")
+pub def no_foreground() -> Nil
+
+@external(erlang, "bea_ffi", "file_exists")
+pub def file_exists(path: String) -> Bool
+
+/// Run a program capturing its combined output line by line.
+@external(erlang, "bea_ffi", "run_lines")
+pub def run_lines(
+  executable: String,
+  args: List(String),
+  cwd: String,
+  state: state,
+  on_line: fn(state, String) -> state,
+) -> (Int, state)
+
+/// Run a program attached to the terminal. Returns the exit code.
+///
+/// All `run_*` functions forward interrupts to the child and make sure it
+/// (and everything it started) is gone when Bea exits, so a program can
+/// never outlive Bea and reset the terminal behind the shell's back.
+@external(erlang, "bea_ffi", "run_inherit")
+pub def run_inherit(executable: String, args: List(String), cwd: String) -> Int
+
+/// Run a program attached to the terminal, except that stderr is captured
+/// line by line.
+@external(erlang, "bea_ffi", "run_stderr_lines")
+pub def run_stderr_lines(
+  executable: String,
+  args: List(String),
+  cwd: String,
+  state: state,
+  on_line: fn(state, String) -> state,
+) -> (Int, state)
+
+/// The Gleam executable: `$BEA_GLEAM` or `gleam` on the PATH.
+pub def gleam_executable() -> Result(String, String) {
+  case get_env("BEA_GLEAM") {
+    Ok(path) -> Ok(path)
+    Error(_) ->
+      find_executable("gleam")
+      |> result.replace_error(
+        "Bea needs the Gleam compiler, but `gleam` was not found on your PATH.\n" <> "Install it from https://gleam.run/getting-started/installing/ " <> "or set BEA_GLEAM to its location.",
+      )
+  }
+}
+
+/// Should we print ANSI colours? Respects NO_COLOR and FORCE_COLOR.
+pub def colour() -> Bool {
+  case get_env("NO_COLOR"), get_env("FORCE_COLOR") {
+    Ok(v), _ if v != "" -> False
+    _, Ok(v) if v != "" -> True
+    _, _ -> is_tty()
+  }
+}
+
+pub def join_path(parts: List(String)) -> String {
+  parts
+  |> list.filter(fn(p) { p != "" and p != "." })
+  |> string.join("/")
+  |> string.replace("//", "/")
+}

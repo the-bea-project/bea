@@ -1,0 +1,10 @@
+pub def f(x, y) {
+  case x, y {
+    0 -> "one pattern for two subjects"
+    _, _ -> "fine"
+  }
+}
+
+pub def g() {
+  return 1 + return 2
+}

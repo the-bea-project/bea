@@ -2,4 +2,5 @@
 *.ez
 /build
 **/.beabuild
-erl_crash.dump
+erl_crash.dump# Generated from compiler/src by scripts/bootstrap.sh (see docs/self-hosting.md)
+/src/

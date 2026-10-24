@@ -1,6 +1,7 @@
 #!/bin/sh
 # Development launcher: runs the bea CLI from this checkout's build directory.
-# Build first with `gleam build`. For a release binary use gleepack or
+# Build first with scripts/bootstrap.sh (it generates src/ from compiler/src
+# and runs `gleam build`). For a release binary use gleepack or
 # `gleam export erlang-shipment`.
 #
 # Ctrl+C: the VM is started with `+Bi` (it ignores SIGINT, so it can never

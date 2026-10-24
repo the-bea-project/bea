@@ -1,0 +1,69 @@
+//// Language server plumbing: framed JSON-RPC over stdio, and child
+//// processes (`gleam lsp`) attached through Erlang ports.
+
+import bea/lsp/json.{type Json}
+import bea/system
+import gleam/bit_array
+import gleam/int
+
+pub type Port
+
+pub type Event {
+  ClientMessage(BitArray)
+  ClientClosed
+  ServerData(Port, BitArray)
+  ServerExit(Port, Int)
+  Timeout
+}
+
+/// Put stdio in raw byte mode and start reading client messages.
+pub def start() -> Nil {
+  stdio_binary()
+  spawn_stdin_reader()
+}
+
+@external(erlang, "bea_ffi", "stdio_binary")
+def stdio_binary() -> Nil
+
+@external(erlang, "bea_ffi", "spawn_stdin_reader")
+def spawn_stdin_reader() -> Nil
+
+/// Wait for the next event; a negative timeout waits forever.
+@external(erlang, "bea_ffi", "receive_event")
+pub def receive(timeout_ms: Int) -> Event
+
+@external(erlang, "bea_ffi", "write_bytes")
+def write_bytes(data: BitArray) -> Nil
+
+@external(erlang, "bea_ffi", "open_port_process")
+pub def spawn(executable: String, args: List(String), cwd: String) -> Port
+
+@external(erlang, "bea_ffi", "port_send")
+def port_send(port: Port, data: BitArray) -> Bool
+
+@external(erlang, "bea_ffi", "port_close")
+pub def close(port: Port) -> Nil
+
+@external(erlang, "bea_ffi", "split_frames")
+pub def split_frames(buffer: BitArray) -> (List(BitArray), BitArray)
+
+def frame(message: Json) -> BitArray {
+  body = bit_array.from_string(json.to_string(message))
+  header =
+    "Content-Length: " <> int.to_string(bit_array.byte_size(body)) <> "\r\n\r\n"
+  bit_array.append(bit_array.from_string(header), body)
+}
+
+/// Send a message to the editor.
+pub def send_client(message: Json) -> Nil {
+  write_bytes(frame(message))
+}
+
+/// Send a message to a child server.
+pub def send_child(port: Port, message: Json) -> Bool {
+  port_send(port, frame(message))
+}
+
+pub def log(message: String) -> Nil {
+  system.print_stderr("[bea lsp] " <> message <> "\n")
+}
