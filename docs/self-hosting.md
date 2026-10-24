@@ -32,13 +32,15 @@ to Bea: the audit, the plan, and what was verified.
 
 | Path | What it is |
 | --- | --- |
-| `compiler/src/` | The compiler's sources, authoritative: 33 Bea modules (about 20 700 lines) and the Erlang FFI `bea_ffi.erl` and `bea_signal.erl`. Same module names as before: `bea`, `bea/parser`, `bea/lsp/server`, ... |
+| `compiler/src/` | The compiler's sources, authoritative: 34 Bea modules (about 20 900 lines) and the Erlang FFI `bea_ffi.erl` and `bea_signal.erl`. Same module names as before: `bea`, `bea/parser`, `bea/lsp/server`, ... |
 | `src/` | Generated from `compiler/src` by `scripts/bootstrap.sh`. Not in git. `src/.bea-generated` lists every file with its hash. |
 | `gleam.toml`, `manifest.toml` | The Gleam package `bea` (the compiler), as before. The bootstrap compiles `compiler/src` with this configuration (as the `bea.toml` of a Bea project). |
 | `test/` | The Gleam test suite (gleeunit), testing the compiler through its modules. |
 | `bootstrap/seed.env` | The trusted seed: the git tree hash of the last all-Gleam revision. |
 | `scripts/bootstrap.sh` | Builds the compiler: stages A, B, C, comparison, installation of `src/`. |
 | `scripts/verify_bootstrap.sh` | Compares compilers A, B and C on outputs and test suites. |
+| `bootstrap/changes-since-seed` | The intended differences between the seed's output and the self-hosted compiler's, one recorded output per line with the reason. |
+| `scripts/pack.sh` | Builds the compiler as a standalone executable with gleepack (`build/bea`). |
 | `tools/migrate/` | The tooling that did the migration (translator and equivalence checker). Not needed to build. |
 
 No compiler module was kept in Gleam: everything that was a Gleam module is
@@ -108,6 +110,13 @@ scripts/verify_bootstrap.sh # compares A, B and C (outputs and test suites)
 A full bootstrap takes about a minute; the seed's build is kept between
 runs. CI (`.github/workflows/test.yml`) does the same.
 
+`scripts/pack.sh` then builds the compiler as a standalone executable,
+`build/bea`, with [gleepack](https://github.com/yoshi-monster/gleepack): it
+runs the full bootstrap first and packs exactly that compiler (the `bea`
+Gleam package in the repository root, entry point `bea.main`), so the binary
+is the verified self-hosted compiler. It needs gleepack on the PATH or in
+`BEA_GLEEPACK`.
+
 ## Working on the compiler
 
 Edit `compiler/src/**/*.bea`, never `src/`. Then:
@@ -125,6 +134,15 @@ with the new one (`bootstrap_test` fails until the result is a fixed
 point). Before committing run the full `scripts/bootstrap.sh`, and
 `scripts/verify_bootstrap.sh` for a change that could alter behaviour.
 Format with `scripts/bea format compiler/src` (CI checks it).
+
+`scripts/verify_bootstrap.sh` compares the seed with the self-hosted
+compiler on its whole corpus, so a change in behaviour shows up there as a
+difference between A and B, and fails until it is declared: add each
+recorded output that changes (a path under `build/bootstrap/verify/A/`, as
+the failure lists them) to `bootstrap/changes-since-seed`, with the reason.
+A change nobody declared fails, and so does a declaration that no longer
+differs, so the file is always the exact list of how the compiler has moved
+away from the seed. B and C are always compared without exceptions.
 
 The compiler's source is ordinary Bea: other modules of `compiler/src`
 are imported as usual, and so are Gleam packages and Gleam modules placed
@@ -345,15 +363,16 @@ Each stage was translated with `tools/migrate/migrate.sh`, formatted with
 
 - **Output, byte for byte, for A, B and C**: `bea transpile` and
   `bea format --stdin` of every `.bea` file in the repository (the
-  compiler's 33 modules, the exercism examples, the fixtures, the test
+  compiler's modules, the exercism examples, the fixtures, the test
   projects and the invalid programs of `test_projects/invalid`: lexer,
   parser, recovery, record shorthand, deriving, associated-function,
   lowering and reserved-word errors), whole-project compilation
   (`beacode/`, the fixtures, `test_projects/deriving` and
   `test_projects/broken`, which has a duplicate module and an invalid
   module name), and `--help`, `--version`, `run --help`, usage errors, an
-  unknown command, a missing file and `format --check`. Standard output,
-  standard error and exit status must be identical.
+  unknown command, a missing file, `format --check` and `pack`. Standard
+  output, standard error and exit status must be identical, except for
+  the changes `bootstrap/changes-since-seed` declares between A and B.
 - **Behaviour, for B and for C**: the Gleam unit tests (run in each
   stage's own package, against that stage's modules), the end-to-end
   tests (which compile and run the fixtures and examples and compare what

@@ -1,0 +1,14 @@
+# Outputs of scripts/verify_bootstrap.sh that may differ between the trusted
+# seed (compiler A) and the self-hosted compiler (B): the intended changes to
+# the compiler since the seed. Every other recorded output must stay
+# identical, and every line here must still differ (or be removed).
+#
+# Format: <recorded output, under build/bootstrap/verify/<stage>/>  <why>
+
+cli/help.out                  bea pack: a new command in the help
+cli/unknown-command.out       bea pack: the help printed after the error lists it
+cli/pack-help.out             bea pack: the seed has no `pack` command
+cli/pack-help.err             bea pack: the seed has no `pack` command
+cli/pack-help.code            bea pack: the seed has no `pack` command
+cli/pack-unknown-option.err   bea pack: the seed has no `pack` command
+cli/pack-unknown-option.out   bea pack: the seed has no `pack` command

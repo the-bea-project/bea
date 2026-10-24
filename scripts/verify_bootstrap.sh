@@ -13,8 +13,10 @@
 #      formatting of the examples (`bea format --check`), and print their
 #      help, version and usage errors. Standard output, standard error, the
 #      exit status and the generated Gleam must be the same byte for byte
-#      for A, B and C: the self-hosted compilers behave like the trusted
-#      one on valid and on invalid programs.
+#      for B and C, and for A and B except for the changes made to the
+#      compiler since the seed, which bootstrap/changes-since-seed declares
+#      one by one: the self-hosted compilers behave like the trusted one on
+#      valid and on invalid programs.
 #   2. Behaviour. The Gleam unit tests, scripts/test_examples.sh (which runs
 #      the compiled programs and compares what they print),
 #      scripts/test_tooling.sh and the language server test run against B
@@ -104,6 +106,8 @@ for stage in A B C; do
   record "$stage" cli/format-check-examples "$bea" format --check beacode/src test/fixtures
   record "$stage" cli/format-check-unformatted "$bea" format --check test_projects/invalid/unformatted.bea
   record "$stage" cli/transpile-missing "$bea" transpile does/not/exist.bea
+  record "$stage" cli/pack-help "$bea" pack --help
+  record "$stage" cli/pack-unknown-option "$bea" pack --frob
   project "$stage" beacode beacode
   project "$stage" fixtures "$fixtures_project"
   project "$stage" deriving test_projects/deriving
@@ -119,7 +123,25 @@ compare() {
     head -40 "$OUT/$x-vs-$y.diff"
   fi
 }
-compare A B
+# A against B: identical except for the changes made to the compiler since
+# the seed, each declared in bootstrap/changes-since-seed.
+declared=$(grep -v '^#' bootstrap/changes-since-seed | awk 'NF { print $1 }' | sort)
+differing=$(cd "$OUT" && diff -rq A B | sed -n 's|^Files A/\([^ ]*\) and B/.*|\1|p; s|^Only in \([AB]\)\(/[^:]*\)\{0,1\}: \(.*\)|\1\2/\3|p' | sort)
+undeclared=$(comm -23 <(printf '%s\n' "$differing" | sed '/^$/d') <(printf '%s\n' "$declared"))
+stale=$(comm -13 <(printf '%s\n' "$differing" | sed '/^$/d') <(printf '%s\n' "$declared"))
+diff -r "$OUT/A" "$OUT/B" >"$OUT/A-vs-B.diff"
+if [ -z "$undeclared" ] && [ -z "$stale" ]; then
+  pass "A and B: identical output, except the $(printf '%s\n' "$declared" | sed '/^$/d' | wc -l | tr -d ' ') declared changes since the seed"
+else
+  [ -z "$undeclared" ] || {
+    fail "A and B differ beyond the changes declared in bootstrap/changes-since-seed (build/bootstrap/verify/A-vs-B.diff):"
+    printf '%s\n' "$undeclared" | sed 's/^/       /'
+  }
+  [ -z "$stale" ] || {
+    fail "declared in bootstrap/changes-since-seed but identical for A and B (remove them):"
+    printf '%s\n' "$stale" | sed 's/^/       /'
+  }
+fi
 compare B C
 
 # Sanity: the corpus exercises both successes and failures.

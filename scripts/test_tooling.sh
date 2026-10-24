@@ -9,6 +9,10 @@
 #      Gleam module into src/, Bea code imports it, regenerating or removing
 #      it is picked up, repeated builds leave it alone.
 #   4. (opt-in, BEA_TEST_MARMOT=1) The same with the real Marmot and SQLite.
+#   5. `bea pack` with a stand-in gleepack: where it runs, its arguments,
+#      where the executable goes, errors.
+#   6. (opt-in, BEA_TEST_GLEEPACK=1) `bea pack` with the real gleepack (on
+#      the PATH or in BEA_GLEEPACK), and the executable it builds.
 #
 # The tool is test_projects/tooling/fixture_tool, a small Gleam package that
 # behaves like Marmot (reads [tools.<name>] from gleam.toml, generates code
@@ -254,6 +258,121 @@ EOF
   check "marmot: configured from [tools.marmot] in bea.toml" '[ $code -eq 0 ]'
 else
   echo "SKIP marmot tests (set BEA_TEST_MARMOT=1; they need Hex and a C compiler)"
+fi
+
+# --- 5. bea pack (with a stand-in gleepack) ------------------------------------------
+
+# Records where it runs and its arguments, and writes the --output file.
+STUBS="$ROOT/stub bin"
+mkdir -p "$STUBS"
+cat >"$STUBS/gleepack" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$PWD" >"$GLEEPACK_LOG"
+for a in "$@"; do printf '%s\n' "$a" >>"$GLEEPACK_LOG"; done
+for a in "$@"; do
+  case $a in --output=*) printf 'packed\n' >"${a#--output=}" ;; esac
+done
+STUB
+chmod +x "$STUBS/gleepack"
+LOG="$ROOT/gleepack log"
+log() { cat "$LOG" 2>/dev/null; }
+# The PATH without any real gleepack on it, but with what Bea needs (which
+# may live in the same directory as gleepack).
+KEEP="$ROOT/kept tools"
+mkdir -p "$KEEP"
+for t in gleam erl erlc escript rebar3 node; do
+  p=$(command -v "$t" 2>/dev/null) && ln -s "$p" "$KEEP/$t"
+done
+NO_GLEEPACK_PATH="$KEEP:$(printf '%s' "$PATH" | tr ':' '\n' |
+  while IFS= read -r d; do [ -x "$d/gleepack" ] || printf '%s:' "$d"; done)"
+
+rm -f "$LOG"
+run "$APP" env BEA_GLEEPACK="$STUBS/gleepack" GLEEPACK_LOG="$LOG" $BEA pack
+check "bea pack runs gleepack in the generated project" \
+  '[ $code -eq 0 ] && [ "$(log | sed -n 1p)" = "$APP/.beabuild" ]'
+check "bea pack: gleepack build, to build/<package> by default" \
+  '[ "$(log | sed -n 2,3p)" = "build
+--output=$APP/build/example" ] && [ -f "$APP/build/example" ]'
+
+rm -f "$LOG"
+mkdir -p "$APP/sub dir"
+run "$APP/sub dir" env PATH="$STUBS:$NO_GLEEPACK_PATH" GLEEPACK_LOG="$LOG" \
+  $BEA pack -o "out/the app" -m example --target=amd64-linux-otp-29.1.1 -t aarch64-macos-otp-29.1.1
+check "bea pack finds gleepack on the PATH, --output is relative to the cwd" \
+  '[ $code -eq 0 ] && [ "$(log | sed -n 3p)" = "--output=$APP/sub dir/out/the app" ] && [ -f "$APP/sub dir/out/the app" ]'
+check "bea pack passes --module and every --target" \
+  '[ "$(log | sed -n 4,6p)" = "--module=example
+--target=amd64-linux-otp-29.1.1
+--target=aarch64-macos-otp-29.1.1" ]'
+
+rm -f "$LOG"
+cp "$APP/bea.toml" "$ROOT/bea.toml.saved"
+printf '\n[tools.gleepack]\noutput = "dist/example"\n' >>"$APP/bea.toml"
+run "$APP/sub dir" env BEA_GLEEPACK="$STUBS/gleepack" GLEEPACK_LOG="$LOG" $BEA pack
+check "bea pack: [tools.gleepack] output is relative to the project root" \
+  '[ $code -eq 0 ] && [ "$(log | sed -n 3p)" = "--output=$APP/dist/example" ]'
+cp "$ROOT/bea.toml.saved" "$APP/bea.toml"
+
+run "$APP" env PATH="$NO_GLEEPACK_PATH" BEA_GLEEPACK= $BEA pack
+check "bea pack without gleepack says how to get it" \
+  '[ $code -ne 0 ] && has "$err" "gleepack not found" && has "$err" "dev_dependencies"'
+run "$APP" env BEA_GLEEPACK="$ROOT/nowhere" $BEA pack
+check "bea pack: a BEA_GLEEPACK that doesn't exist is an error" \
+  '[ $code -ne 0 ] && has "$err" "BEA_GLEEPACK"'
+run "$APP" $BEA pack --frob
+check "bea pack: unknown options are an error" \
+  '[ $code -ne 0 ] && has "$err" "Unknown option" && has "$err" "Usage: bea pack"'
+run "$APP" $BEA pack --help
+check "bea pack --help" '[ $code -eq 0 ] && has "$out" "gleepack"'
+
+P="$ROOT/broken pack"
+(cd "$ROOT" && $BEA new broken_pack >/dev/null && mv broken_pack "$P")
+printf 'pub def main() {\n  1 + "x"\n}\n' >"$P/src/broken_pack.bea"
+rm -f "$LOG"
+run "$P" env BEA_GLEEPACK="$STUBS/gleepack" GLEEPACK_LOG="$LOG" $BEA pack
+check "bea pack: type errors stop it, reported on the .bea file" \
+  '[ $code -ne 0 ] && has "$err" "src/broken_pack.bea" && [ ! -f "$LOG" ]'
+
+# --- 6. bea pack with the real gleepack (opt-in) ------------------------------------
+
+if [ "${BEA_TEST_GLEEPACK:-}" = "1" ]; then
+  # Needs gleepack (on the PATH or in BEA_GLEEPACK), and the network the
+  # first time, to download its runtime.
+  G="$ROOT/packed app"
+  (cd "$ROOT" && $BEA new packed_app >/dev/null && mv packed_app "$G")
+  (cd "$G" && $BEA add argv >/dev/null 2>&1)
+  cat >"$G/src/packed_app.bea" <<'BEA'
+import argv
+
+pub type Greeting(name: String, loud: Bool)
+
+def render(Greeting(name:, loud: True)) {
+  string.uppercase("hello, #{name}!")
+}
+
+def render(Greeting(name:, ..)) {
+  "hello, #{name}"
+}
+
+pub def main() {
+  name = case argv.load().arguments {
+    [n | _] -> n
+    [] -> "world"
+  }
+  io.println(render(Greeting(name, loud: name == "bea")))
+}
+BEA
+  run "$G" $BEA pack
+  check "gleepack: bea pack builds an executable" \
+    '[ $code -eq 0 ] && [ -x "$G/build/packed_app" ]'
+  run "$G" "$G/build/packed_app" bea
+  check "gleepack: the executable runs, with its arguments" \
+    '[ $code -eq 0 ] && [ "$out" = "HELLO, BEA!" ]'
+  run "$ROOT" env PATH=/usr/bin:/bin "$G/build/packed_app"
+  check "gleepack: the executable runs without Erlang on the PATH" \
+    '[ $code -eq 0 ] && [ "$out" = "hello, world" ]'
+else
+  echo "SKIP gleepack tests (set BEA_TEST_GLEEPACK=1; they need gleepack)"
 fi
 
 echo

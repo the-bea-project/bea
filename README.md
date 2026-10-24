@@ -99,6 +99,7 @@ my_app/
 | `bea transpile FILE.bea` | Print the Gleam generated for a file (`--stdin` reads the source from stdin) |
 | `bea transpile --out DIR` | Write the project out as a plain Gleam project ("eject") |
 | `bea export erlang-shipment\|escript\|...` | Gleam's export commands |
+| `bea pack [-o PATH] [-m MODULE] [-t TARGET]` | Package the project into one standalone executable, with [gleepack](https://github.com/yoshi-monster/gleepack) |
 | `bea publish` | Publish to Hex (as the generated Gleam package) |
 | `bea hex ...` | Hex account commands |
 | `bea clean` | Delete `.beabuild/` |
@@ -286,12 +287,47 @@ Bea projects depend on Gleam packages the same way. Fill in `description`,
 `licences` and `repository` in `bea.toml` first; `README.md`, `LICENCE` and
 `CHANGELOG.md` are included automatically.
 
+### Standalone executables: `bea pack`
+
+`bea pack` packages the project into a single executable with
+[gleepack](https://github.com/yoshi-monster/gleepack): the compiled project,
+its dependencies and a small Erlang runtime in one file, which runs on
+machines without Erlang. It suits CLIs, TUIs and dev tools on the Erlang
+target (gleepack's own limits apply: no NIFs, a read-only `priv`).
+
+```sh
+bea pack                          # build/<package>, runs the package's main
+bea pack -o dist/app              # somewhere else (relative to where you are)
+bea pack -m app/cli               # another module's main
+bea pack -t amd64-linux-otp-29.1.1 -t aarch64-macos-otp-29.1.1   # cross-build
+```
+
+gleepack is the `gleepack` executable on the PATH (from its
+[releases](https://github.com/yoshi-monster/gleepack/releases)), or the one
+`BEA_GLEEPACK` names, or a dev dependency of the project:
+
+```toml
+[dev_dependencies]
+gleepack = { git = "https://github.com/yoshi-monster/gleepack.git", ref = "main" }
+```
+
+Bea builds the project first, so errors point at your `.bea` files, then runs
+gleepack on the generated Gleam project. gleepack's settings go in
+`bea.toml` under `[tools.gleepack]` (`output`, relative to the project root,
+`module` and `targets`); the command line wins over them.
+
 ### Building a standalone `bea` binary
 
 The CLI is a normal Gleam program (`bea.main`), generated from its Bea
-sources (see [Development](#development)). Package it with gleepack, or with
-`gleam export erlang-shipment`. For development, `scripts/bea` runs the CLI
-straight from this checkout after `scripts/bootstrap.sh`.
+sources (see [Development](#development)). `scripts/pack.sh` builds it as a
+gleepack executable, `build/bea`: it runs the full bootstrap first (trusted
+seed, then the self-hosted compiler), so the binary is exactly the verified
+compiler, then packs it (`--output PATH`, and gleepack options such as
+`--target=...`). The binary needs no Erlang to run; Gleam (and the Erlang it
+needs to build Erlang projects) is still required for `bea build`, `run`,
+`check` and the like. `gleam export erlang-shipment` works too. For
+development, `scripts/bea` runs the CLI straight from this checkout after
+`scripts/bootstrap.sh`.
 
 Ctrl+C works with both: `scripts/bea` starts the VM with `+Bi` and turns
 SIGINT into a SIGTERM, and gleepack's runtime does that conversion itself.
@@ -891,6 +927,7 @@ to work on the compiler and how to recover when it can't build itself.
 | `bea/gleam_output` | Rewrites Gleam CLI output to Bea locations |
 | `bea/cli` | The `bea` command |
 | `bea/entrypoint` | `bea run`: its arguments, finding the module to run (in the project or a dependency), tool configuration |
+| `bea/pack` | `bea pack`: its options, where the executable goes, finding and running gleepack |
 | `bea/style`, `bea/highlight` | The CLI's colours, and syntax highlighting of Bea and Gleam |
 | `bea/shell`, `bea/line_editor` | `bea shell`: Bea front end for GSH's evaluator, and its line editor |
 | `bea/lsp/*` | JSON, JSON-RPC transport, the proxying language server |
@@ -910,10 +947,11 @@ scripts/bootstrap.sh            # build the compiler: seed A -> B -> C, installs
 gleam test                      # unit tests
 export PATH=$PWD/scripts:$PATH
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
-scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code (BEA_TEST_MARMOT=1: also Marmot)
+scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code, bea pack (BEA_TEST_MARMOT=1: also Marmot; BEA_TEST_GLEEPACK=1: also gleepack)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
 scripts/verify_bootstrap.sh     # the self-hosted compilers behave like the trusted one
+scripts/pack.sh                 # the compiler as a standalone executable, build/bea (needs gleepack)
 ```
 
 `beacode/` holds Bea solutions to the Gleam exercism track; `test/fixtures/`

@@ -14,6 +14,7 @@ import bea/highlight
 import bea/imports
 import bea/lsp/index
 import bea/lsp/server as lsp
+import bea/pack
 import bea/project.{type Project}
 import bea/shell
 import bea/style
@@ -56,6 +57,7 @@ pub def main(args: List(String)) -> Int {
     ["format" | rest] | ["fmt" | rest] -> format(rest)
     ["transpile" | rest] -> transpile(rest)
     ["export" | rest] -> passthrough(["export" | rest], True)
+    ["pack" | rest] -> pack_command(rest)
     ["publish" | rest] -> publish(rest)
     ["hex" | rest] -> passthrough(["hex" | rest], False)
     ["shell" | _] | ["repl" | _] -> shell_command()
@@ -131,6 +133,12 @@ def help() -> String {
       "<WHAT>",
       "Export an escript, Erlang shipment, hex tarball, ...",
     ),
+    command(
+      "pack",
+      "[OPTIONS]",
+      "Package the project into a standalone executable",
+    ),
+    "                       (with gleepack; see --help)",
     "",
     heading("Code"),
     command(
@@ -919,6 +927,55 @@ def scratch_project() -> Result(Project, Nil) {
 
 /// Bea packages are published to Hex as the Gleam code they compile to, so
 /// both Gleam and Bea projects can depend on them.
+/// `bea pack`: the project as a standalone executable, built by gleepack in
+/// the generated Gleam project (see bea/pack).
+def pack_command(args: List(String)) -> Int {
+  case pack.parse(args) {
+    Ok(pack.Help) -> {
+      io.println(pack.help())
+      0
+    }
+    Ok(pack.Pack(options)) -> pack_project(options)
+    Error(message) -> {
+      error(message <> "\n" <> pack.usage)
+      1
+    }
+  }
+}
+
+def pack_project(options: pack.Options) -> Int {
+  use p <- or_exit(current_project())
+  manifest = simplifile.read(p.root <> "/manifest.toml") |> option.from_result
+  packer = case pack.find(manifest) {
+    Ok(packer) -> Ok(packer)
+    Error(message) -> {
+      error(message)
+      Error(Nil)
+    }
+  }
+  use packer <- or_exit(packer)
+  use exe <- or_exit(gleam())
+  use s <- or_exit(sync(p))
+  // Built first so that errors are reported on the .bea files; gleepack then
+  // compiles the same Gleam for its own runtime.
+  case run_gleam(p, s, ["build", "--target", "erlang"]) {
+    0 -> {
+      output = pack.output_path(p, options, system.cwd())
+      _ = simplifile.create_directory_all(project.dirname(output))
+      status("Packing", p.name <> " with gleepack")
+      (command, args) = pack.command(
+        packer,
+        exe,
+        pack.gleepack_args(options, output),
+      )
+      code = system.run_inherit(command, args, p.build_dir)
+      project.sync_back(p, False)
+      code
+    }
+    code -> code
+  }
+}
+
 def publish(args: List(String)) -> Int {
   use p <- or_exit(current_project())
   use _ <- or_exit(sync(p))
