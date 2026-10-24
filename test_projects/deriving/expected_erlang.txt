@@ -19,3 +19,7 @@ order as json: {"id":7,"customer":{"id":"u1","age":36,"active":true,"tags":["adm
 cart: Ok(Cart([Product("wax", Price(120), dict.from_list([]))]))
 decode.run: Error([DecodeError("Dict", "String", []), DecodeError("Dict", "String", [])])
 json.parse + decode.list: Ok([Credentials("a", "b")])
+token: Ok(AuthToken("u1", "ops"))
+token is admin: False
+promoted is admin: True
+promoted as json: {"sub":"u1","role":"admin"}

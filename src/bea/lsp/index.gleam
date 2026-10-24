@@ -508,13 +508,13 @@ pub fn signature(entry: Entry, qualifier: Option(String)) -> String {
       let params =
         list.map(entry.params, param_string)
         |> string.join(", ")
-      let return = case entry.kind, entry.return_type {
+      let return_ = case entry.kind, entry.return_type {
         Constructor, _ | _, "" -> ""
         _, t -> " -> " <> t
       }
       case entry.kind, entry.params {
         Constructor, [] -> name
-        _, _ -> name <> "(" <> params <> ")" <> return
+        _, _ -> name <> "(" <> params <> ")" <> return_
       }
     }
   }

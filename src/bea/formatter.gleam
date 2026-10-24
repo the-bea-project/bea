@@ -830,7 +830,17 @@ fn item_doc(it: Item, ctx: Ctx) -> Doc {
         },
       ])
     }
-    ast.CustomType(span, d, attrs, p, opaque_, name, _, params, variants) -> {
+    ast.CustomType(
+      span,
+      d,
+      attrs,
+      p,
+      opaque_,
+      name,
+      name_span,
+      params,
+      variants,
+    ) -> {
       let head =
         publicity(p)
         <> case opaque_ {
@@ -838,8 +848,8 @@ fn item_doc(it: Item, ctx: Ctx) -> Doc {
           False -> ""
         }
         <> "type "
-        <> name
-        <> type_params(params)
+      use <- record_shorthand(ctx, it, name_span, d, attrs, head)
+      let head = head <> name <> type_params(params)
       let body = case variants {
         [] -> t(" {}")
         _ ->
@@ -886,6 +896,31 @@ fn item_doc(it: Item, ctx: Ctx) -> Doc {
         assigned(value, ctx),
       ])
     ast.Function(..) -> doc.empty
+  }
+}
+
+/// `type Name(fields)` stays in that form: the parser gives its constructor
+/// a span starting at the type's name, which a constructor written inside
+/// `{ ... }` can't have.
+fn record_shorthand(
+  ctx: Ctx,
+  it: Item,
+  name_span: Span,
+  d: List(String),
+  attrs: List(ast.Attribute),
+  head: String,
+  otherwise: fn() -> Doc,
+) -> Doc {
+  case it {
+    ast.CustomType(span:, params: [], variants: [v], ..)
+      if v.span.start == name_span.start
+    ->
+      doc.concat([
+        docs(d),
+        attributes(attrs),
+        el(ctx, span, v.span, doc.concat([t(head), variant_doc(v, ctx)])),
+      ])
+    _ -> otherwise()
   }
 }
 

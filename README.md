@@ -520,6 +520,29 @@ pub type Scores = Dict(String, Int)
 pub const max_players: Int = 4
 ```
 
+#### Record shorthand
+
+A type with a single constructor named like the type can be declared on
+one line:
+
+```bea
+pub type AuthToken(sub: String, role: String)
+type Point(x: Float, y: Float)   // private
+pub type UserId(Int)             // positional fields
+pub opaque type Email(String)
+```
+
+Each is exactly the long form, e.g. `pub type AuthToken { AuthToken(sub:
+String, role: String) }`: the parser turns one into the other, so the
+Gleam, `@derive`, functions through the type (`AuthToken.decoder()`),
+patterns and record updates are the same for both. The formatter keeps
+whichever form you wrote.
+
+Generic types keep the long form: `type Box(a)` already means a type `Box`
+with a parameter `a` (and no constructors), so a field type can't be a type
+parameter in the shorthand (`type Box(value: a)` is an error that says so).
+Write `pub type Box(a) { Box(value: a) }` instead.
+
 ### Deriving functions: `@derive`
 
 Decoders, encoders, form readers and the like follow the fields of a record

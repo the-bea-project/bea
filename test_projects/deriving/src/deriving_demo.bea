@@ -4,6 +4,7 @@ import bea_json/decoder
 import bea_json/encoder
 import deriving_demo/auth
 import deriving_demo/orders
+import deriving_demo/tokens
 import deriving_demo/users.{type User}
 import form
 
@@ -119,6 +120,23 @@ pub def main() {
     json.parse(
       `[{"username": "a", "password": "b"}]`,
       decode.list(auth.Credentials.decoder()),
+    ),
+  )
+
+  // Record shorthand derives like the long form.
+  token = decoder.from_json(
+    `{"sub": "u1", "role": "ops"}`,
+    tokens.AuthToken.decoder(),
+  )
+  show("token", token)
+  Ok(token) = token else panic
+  show("token is admin", tokens.is_admin(token))
+  promoted = tokens.promote(token)
+  show("promoted is admin", tokens.is_admin(promoted))
+  io.println(
+    "promoted as json: " <> encoder.to_string(
+      promoted,
+      tokens.AuthToken.encoder(),
     ),
   )
 }

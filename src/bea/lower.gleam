@@ -630,7 +630,7 @@ fn desugar_expr(e: Expr) -> Expr {
     ast.Block(s, stmts) -> ast.Block(s, desugar_stmts(stmts))
     ast.If(s, c, t, el) ->
       ast.If(s, d(c), desugar_stmts(t), option.map(el, desugar_stmts))
-    ast.Cond(s, clauses) -> cond(s, clauses)
+    ast.Cond(s, clauses) -> cond_(s, clauses)
     ast.Case(s, subjects, clauses) ->
       ast.Case(
         s,
@@ -691,7 +691,7 @@ fn desugar_arg(a: ast.Arg) -> ast.Arg {
   ast.Arg(..a, value: option.map(a.value, desugar_expr))
 }
 
-fn cond(s: Span, clauses: List(ast.CondClause)) -> Expr {
+fn cond_(s: Span, clauses: List(ast.CondClause)) -> Expr {
   case clauses {
     [] ->
       ast.Panic(s, Some(ast.String(s, [ast.Text("No cond clause matched", s)])))
@@ -702,7 +702,7 @@ fn cond(s: Span, clauses: List(ast.CondClause)) -> Expr {
         cs,
         desugar_expr(c),
         [ast.Expression(desugar_expr(body))],
-        Some([ast.Expression(cond(s, rest))]),
+        Some([ast.Expression(cond_(s, rest))]),
       )
   }
 }

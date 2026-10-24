@@ -206,7 +206,7 @@ fn item(ts: Tokens) -> Parsed(Item) {
           ))
       }
     }
-    [Token(lexer.Def, _, _), ..rest] -> def(start, attrs, publicity, rest)
+    [Token(lexer.Def, _, _), ..rest] -> def_(start, attrs, publicity, rest)
     [Token(lexer.Type, _, _), ..rest] ->
       type_definition(start, attrs, publicity, False, rest)
     [Token(lexer.Opaque, _, _), Token(lexer.Type, _, _), ..rest] ->
@@ -390,7 +390,7 @@ fn optional_annotation(ts: Tokens) -> Parsed(Option(Type)) {
 
 // --- Functions -----------------------------------------------------------------
 
-fn def(
+fn def_(
   start: Span,
   attrs: List(Attribute),
   publicity: ast.Publicity,
@@ -491,6 +491,146 @@ fn type_definition(
   ts: Tokens,
 ) -> Parsed(Item) {
   use #(#(name, name_span), ts) <- result.try(expect_upname(ts, "a type name"))
+  case record_shorthand(ts) {
+    True ->
+      record_shorthand_type(
+        start,
+        attrs,
+        publicity,
+        opaque_,
+        name,
+        name_span,
+        ts,
+      )
+    False ->
+      type_definition_rest(
+        start,
+        attrs,
+        publicity,
+        opaque_,
+        name,
+        name_span,
+        ts,
+      )
+  }
+}
+
+/// `type Name(...)` is record shorthand when the parentheses hold something
+/// other than bare lowercase names: `type Point(x: Float)`, `type Id(Int)`.
+/// Bare names (`type Box(a)`) keep meaning type parameters.
+fn record_shorthand(ts: Tokens) -> Bool {
+  case ts {
+    [Token(lexer.LParen, _, False), ..rest] -> !only_type_params(rest)
+    _ -> False
+  }
+}
+
+/// Is what follows an opening paren a list of type parameters `a, b)`?
+fn only_type_params(ts: Tokens) -> Bool {
+  case ts {
+    [Token(lexer.RParen, _, _), ..] -> True
+    [Token(lexer.Name(_), _, _), Token(lexer.RParen, _, _), ..] -> True
+    [Token(lexer.Name(_), _, _), Token(lexer.Comma, _, _), ..rest] ->
+      only_type_params(rest)
+    _ -> False
+  }
+}
+
+/// `type Name(fields)`: the type has a single constructor named like it,
+/// exactly as if written `type Name { Name(fields) }`. The constructor's span
+/// starts at the type's name (the name is the constructor's too), which is
+/// how the formatter tells the two forms apart.
+fn record_shorthand_type(
+  start: Span,
+  attrs: List(Attribute),
+  publicity: ast.Publicity,
+  opaque_: Bool,
+  name: String,
+  name_span: Span,
+  ts: Tokens,
+) -> Parsed(Item) {
+  use #(_, ts) <- result.try(expect(ts, lexer.LParen, "`(`"))
+  use #(#(fields, close), ts) <- result.try(
+    sequence(ts, lexer.RParen, "`)`", field, []),
+  )
+  let type_variable =
+    list.flat_map(fields, fn(f) { type_variables(f.type_) }) |> list.first
+  case type_variable, ts {
+    Ok(#(var, s)), _ ->
+      Error(
+        diagnostic.error(
+          "Type parameter in record shorthand",
+          s,
+          "`"
+            <> var
+            <> "` is a type parameter, which record shorthand can't declare",
+        )
+        |> diagnostic.with_hint(
+          "Declare generic types in full: `type "
+          <> name
+          <> "("
+          <> var
+          <> ") { "
+          <> name
+          <> "(...) }`.",
+        ),
+      )
+    _, [Token(lexer.LBrace, s, _), ..] | _, [Token(lexer.Eq, s, _), ..] ->
+      Error(
+        diagnostic.error(
+          "Unexpected body",
+          s,
+          "a record shorthand type has no body",
+        )
+        |> diagnostic.with_hint(
+          "Write either `type "
+          <> name
+          <> "(...)` or `type "
+          <> name
+          <> " { "
+          <> name
+          <> "(...) }`.",
+        ),
+      )
+    _, _ -> {
+      let variant = ast.Variant(sp(name_span, close.span), name, fields, [])
+      Ok(#(
+        ast.CustomType(
+          sp(start, close.span),
+          [],
+          attrs,
+          publicity,
+          opaque_,
+          name,
+          name_span,
+          [],
+          [variant],
+        ),
+        ts,
+      ))
+    }
+  }
+}
+
+fn type_variables(t: Type) -> List(#(String, Span)) {
+  case t {
+    ast.VarType(s, n) -> [#(n, s)]
+    ast.NamedType(args:, ..) -> list.flat_map(args, type_variables)
+    ast.TupleType(_, elements) -> list.flat_map(elements, type_variables)
+    ast.FnType(_, params, ret) -> list.flat_map([ret, ..params], type_variables)
+    ast.HoleType(..) -> []
+  }
+}
+
+fn type_definition_rest(
+  start: Span,
+  attrs: List(Attribute),
+  publicity: ast.Publicity,
+  opaque_: Bool,
+  name: String,
+  name_span: Span,
+  ts: Tokens,
+) -> Parsed(Item) {
   use #(#(params, header_end), ts) <- result.try(case ts {
     [Token(lexer.LParen, _, False), ..rest] -> {
       use #(#(ps, close), rest) <- result.try(
@@ -1787,15 +1927,22 @@ fn constructor_args(
   }
   case ts {
     [Token(lexer.RParen, s, _), ..rest] -> done(s, False, rest)
-    // Partial match: `Ctor(a: x | _)` or Gleam's `Ctor(a: x, ..)`
+    // Partial match: `Ctor(a: x | _)` or Gleam's `Ctor(a: x, ..)`, also
+    // with the trailing comma Gleam's formatter writes when the pattern
+    // spans several lines (`..,`).
     [
       Token(lexer.Pipe, _, _),
       Token(lexer.Underscore, _, _),
       Token(lexer.RParen, s, _),
       ..rest
     ]
-    | [Token(lexer.DotDot, _, _), Token(lexer.RParen, s, _), ..rest] ->
-      done(s, True, rest)
+    | [Token(lexer.DotDot, _, _), Token(lexer.RParen, s, _), ..rest]
+    | [
+        Token(lexer.DotDot, _, _),
+        Token(lexer.Comma, _, _),
+        Token(lexer.RParen, s, _),
+        ..rest
+      ] -> done(s, True, rest)
     _ -> {
       use #(arg, rest) <- result.try(pattern_arg(ts))
       let acc = [arg, ..acc]

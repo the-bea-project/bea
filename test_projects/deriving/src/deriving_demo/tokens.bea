@@ -1,0 +1,21 @@
+//// Record shorthand: a type with one constructor named like it can be
+//// declared on one line, and derives like any record.
+
+import bea_json/decoder
+import bea_json/encoder
+
+/// What a session carries, as `pub type AuthToken { AuthToken(...) }`.
+@derive(decoder, encoder)
+pub type AuthToken(sub: String, role: String)
+
+pub def is_admin(AuthToken(role: "admin" | _)) {
+  True
+}
+
+pub def is_admin(_) {
+  False
+}
+
+pub def promote(token: AuthToken) -> AuthToken {
+  AuthToken(token | role: "admin")
+}
