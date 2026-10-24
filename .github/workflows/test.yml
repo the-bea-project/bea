@@ -12,10 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The bootstrap builds the trusted seed (bootstrap/seed.env) from
-          # git history, so the clone can't be shallow.
-          fetch-depth: 0
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "28"
@@ -24,23 +20,32 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: gleam deps download
-      - name: Bootstrap the compiler (trusted seed A, then B and C from compiler/src)
-        run: scripts/bootstrap.sh
-      - run: gleam format --check compiler/src test
-      - name: The compiler's Bea sources are formatted
-        run: scripts/bea format --check compiler/src
+      # Bea is written in Bea: building it needs a bea. The latest release's
+      # (a standalone executable, see the README's Development section)
+      # builds this checkout, which then rebuilds itself.
+      - name: Install the latest released bea
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/bea" \
+            "https://github.com/${{ github.repository }}/releases/latest/download/bea-linux-amd64"
+          chmod +x "$HOME/.local/bin/bea"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the compiler with the released bea
+        run: bea build
+      - name: Rebuild it with itself, and use it from here on
+        run: |
+          scripts/bea build
+          echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+      - run: gleam format --check test
+      - name: The compiler's sources are formatted
+        run: bea format --check src
       - name: Unit tests
-        run: gleam test
-      - name: Put the dev launcher on the PATH
-        run: echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+        run: bea test
       - name: End-to-end tests (fixtures, exercism examples, formatter)
         run: scripts/test_examples.sh
-      - name: End-to-end tests (Gleam tools, generated code, Marmot)
+      - name: End-to-end tests (Gleam tools, generated code, bea pack, bea test, Marmot)
         run: scripts/test_tooling.sh
         env:
           BEA_TEST_MARMOT: "1"
       - name: Language server tests
         run: python3 test/lsp/test_lsp.py
-      - name: Compare the trusted and the self-hosted compilers (A, B, C)
-        run: scripts/verify_bootstrap.sh

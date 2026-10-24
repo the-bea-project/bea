@@ -324,7 +324,7 @@ def request(state: State, id: Json, method: String, params: Json) -> State {
             "serverInfo",
             json.object([
               ("name", json.String("bea")),
-              ("version", json.String("0.2.0")),
+              ("version", json.String("0.3.0")),
             ]),
           ),
         ]),

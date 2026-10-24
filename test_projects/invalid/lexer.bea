@@ -1,4 +1,0 @@
-pub def main() {
-  a = 'single quotes'
-  b = "unterminated
-}

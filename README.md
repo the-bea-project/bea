@@ -92,6 +92,7 @@ my_app/
 | `bea update [PKG...]` | Update dependencies |
 | `bea deps list\|download\|tree` | Inspect dependencies |
 | `bea check` | Type check |
+| `bea test [ARGS]` | Run the project's tests: the `main` of `test/<package>_test.gleam` (gleeunit, ...), from the project root |
 | `bea build` | Build (`--target javascript`, `--warnings-as-errors`, ...) |
 | `bea run [-m MODULE \| FILE.bea] [ARGS]` | Run a module's `main`: the project's, or a dependency's such as a Gleam tool (`bea run -m marmot migrate`) |
 | `bea format [--check] [--stdin] [--imports] [PATHS]` | Format `.bea` files (`--imports` also organises imports) |
@@ -318,16 +319,12 @@ gleepack on the generated Gleam project. gleepack's settings go in
 
 ### Building a standalone `bea` binary
 
-The CLI is a normal Gleam program (`bea.main`), generated from its Bea
-sources (see [Development](#development)). `scripts/pack.sh` builds it as a
-gleepack executable, `build/bea`: it runs the full bootstrap first (trusted
-seed, then the self-hosted compiler), so the binary is exactly the verified
-compiler, then packs it (`--output PATH`, and gleepack options such as
-`--target=...`). The binary needs no Erlang to run; Gleam (and the Erlang it
-needs to build Erlang projects) is still required for `bea build`, `run`,
-`check` and the like. `gleam export erlang-shipment` works too. For
-development, `scripts/bea` runs the CLI straight from this checkout after
-`scripts/bootstrap.sh`.
+Bea itself is a Bea project, so `bea pack` in this repository builds the
+`bea` binary, `build/bea` (see [Development](#development)). The binary
+needs no Erlang to run; Gleam (and the Erlang it needs to build Erlang
+projects) is still required for `bea build`, `run`, `check` and the like.
+`bea export erlang-shipment` works too. For development, `scripts/bea` runs
+the CLI this checkout has built.
 
 Ctrl+C works with both: `scripts/bea` starts the VM with `+Bi` and turns
 SIGINT into a SIGTERM, and gleepack's runtime does that conversion itself.
@@ -567,28 +564,33 @@ pub type Scores = Dict(String, Int)
 pub const max_players: Int = 4
 ```
 
-#### Record shorthand
+#### Records
 
-A type with a single constructor named like the type can be declared on
-one line:
+A type with a single constructor named like the type can list its fields
+in braces:
 
 ```bea
-pub type AuthToken(sub: String, role: String)
-type Point(x: Float, y: Float)   // private
-pub type UserId(Int)             // positional fields
-pub opaque type Email(String)
+pub type AuthToken { sub: String, role: String }
+
+type Point { x: Float, y: Float }     // private
+
+pub opaque type Email { address: String }
+
+pub type Page(item) {                 // generic, as usual
+  items: List(item),
+  total: Int,
+}
 ```
 
 Each is exactly the long form, e.g. `pub type AuthToken { AuthToken(sub:
 String, role: String) }`: the parser turns one into the other, so the
 Gleam, `@derive`, functions through the type (`AuthToken.decoder()`),
-patterns and record updates are the same for both. The formatter keeps
-whichever form you wrote.
-
-Generic types keep the long form: `type Box(a)` already means a type `Box`
-with a parameter `a` (and no constructors), so a field type can't be a type
-parameter in the shorthand (`type Box(value: a)` is an error that says so).
-Write `pub type Box(a) { Box(value: a) }` instead.
+construction (`AuthToken(sub: "u1", role: "admin")`), patterns and record
+updates are the same for both. A body starting with `name:` is a record's
+fields; one starting with an uppercase name lists constructors. Fields have
+labels, separated by commas; a type wrapping a value without a label is
+written in full, `pub type UserId { UserId(Int) }`. The formatter keeps
+whichever form you wrote, and a record on one line or one field per line.
 
 ### Deriving functions: `@derive`
 
@@ -809,8 +811,9 @@ evaluated when the assertion fails.
   holding the `return` rather than on the line Gleam finds inconsistent,
   because Gleam sees the rest of the function as the guard's continuation.
 - Doc comments on individual record fields aren't passed on to Gleam.
-- `bea test` and `bea docs` aren't implemented; run the Gleam equivalents
-  inside `.beabuild/` if you need them.
+- `bea docs` isn't implemented; run `gleam docs build` inside `.beabuild/`
+  if you need it. Tests are Gleam modules (`bea test` runs them); test
+  modules written in Bea aren't supported yet.
 - Path dependencies (`{ path = "..." }`) are resolved from `.beabuild/`, so
   relative paths need a `../` (or use an absolute path).
 - Tools that compile the project themselves by running `gleam build` in the
@@ -904,11 +907,9 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
                                                     Type.f → f)       clauses)
 ```
 
-The compiler is written in Bea: its modules are in `compiler/src/`, and a
-trusted seed (the last all-Gleam version, pinned in git) compiles them the
-first time, after which the compiler builds itself.
-[docs/self-hosting.md](docs/self-hosting.md) describes the bootstrap, how
-to work on the compiler and how to recover when it can't build itself.
+The compiler is written in Bea: these modules are in `src/`, and the
+repository is a Bea project like any other, built by a `bea`
+([docs/self-hosting.md](docs/self-hosting.md)).
 
 | Module | Role |
 | --- | --- |
@@ -937,22 +938,28 @@ to work on the compiler and how to recover when it can't build itself.
 
 ## Development
 
-The compiler's sources are in `compiler/src`. `src/` is generated from them
-and isn't committed: build it first. [docs/self-hosting.md](docs/self-hosting.md)
-explains how the compiler is built, from a trusted seed, and how to recover
-when it can't build itself.
+Bea is written in Bea, and this repository is an ordinary Bea project
+(`bea.toml`, the compiler in `src/`, Gleam tests in `test/`): building it
+needs a `bea`, such as the binary from the
+[releases](https://github.com/the-bea-project/bea/releases) page or one you
+built before. [docs/self-hosting.md](docs/self-hosting.md) explains how it
+builds itself, and how to build it without any `bea` at all.
 
 ```sh
-scripts/bootstrap.sh            # build the compiler: seed A -> B -> C, installs src/
-gleam test                      # unit tests
-export PATH=$PWD/scripts:$PATH
+bea build                       # an installed bea builds the compiler into .beabuild/
+scripts/bea build               # ... which rebuilds itself (scripts/bea runs the checkout's build)
+scripts/bea test                # unit tests, with the compiler just built
+export PATH=$PWD/scripts:$PATH  # from here on, `bea` is this checkout's compiler
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
-scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code, bea pack (BEA_TEST_MARMOT=1: also Marmot; BEA_TEST_GLEEPACK=1: also gleepack)
+scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code, bea pack, bea test (BEA_TEST_MARMOT=1: also Marmot; BEA_TEST_GLEEPACK=1: also gleepack)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
-scripts/verify_bootstrap.sh     # the self-hosted compilers behave like the trusted one
-scripts/pack.sh                 # the compiler as a standalone executable, build/bea (needs gleepack)
+bea pack                        # the compiler as a standalone executable, build/bea (needs gleepack)
 ```
+
+`scripts/bea build` is what makes a change to the compiler's code
+generation reach the compiler itself: the first build is compiled by the
+`bea` you had, the second by the new compiler.
 
 `beacode/` holds Bea solutions to the Gleam exercism track; `test/fixtures/`
 holds programs with expected output that cover the remaining exercism concepts

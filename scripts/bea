@@ -1,8 +1,8 @@
 #!/bin/sh
-# Development launcher: runs the bea CLI from this checkout's build directory.
-# Build first with scripts/bootstrap.sh (it generates src/ from compiler/src
-# and runs `gleam build`). For a release binary use gleepack or
-# `gleam export erlang-shipment`.
+# Development launcher: runs the bea CLI this checkout has built.
+# Build it first with `bea build` (an installed bea compiles src/ into
+# .beabuild/); `scripts/bea build` then rebuilds it with itself. For a
+# standalone binary use `bea pack`.
 #
 # Ctrl+C: the VM is started with `+Bi` (it ignores SIGINT, so it can never
 # die while a program it started is still running) and this script turns
@@ -26,7 +26,7 @@ trap '' TSTP
 
 # Background jobs get /dev/null as stdin unless it is redirected explicitly.
 { command exec 3<&0; } 2>/dev/null || exec 3</dev/null
-erl +Bi -pa "$ROOT"/build/dev/erlang/*/ebin -noshell -eval 'bea:main()' -extra "$@" <&3 3<&- &
+erl +Bi -pa "$ROOT"/.beabuild/build/dev/erlang/*/ebin -noshell -eval 'bea:main()' -extra "$@" <&3 3<&- &
 pid=$!
 exec 3<&-
 # Interrupted before the VM was started.

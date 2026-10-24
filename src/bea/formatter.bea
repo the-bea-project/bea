@@ -613,6 +613,28 @@ def seq(
   close: String,
   trailing_comma: Bool,
 ) -> Doc {
+  padded_seq(
+    ctx,
+    container,
+    open,
+    elements,
+    close,
+    trailing_comma,
+    doc.soft_line,
+  )
+}
+
+/// `seq` with `edge` between the brackets and the elements: nothing when on
+/// one line for `soft_line`, a space for `line` (`{ a: Int }`).
+def padded_seq(
+  ctx: Ctx,
+  container: Span,
+  open: String,
+  elements: List((Span, Doc, String)),
+  close: String,
+  trailing_comma: Bool,
+  edge: Doc,
+) -> Doc {
   count = list.length(elements)
   docs = list.index_map(elements, fn(p, i) {
     (s, d, sep) = p
@@ -646,10 +668,10 @@ def seq(
         doc.concat([
           t(open),
           doc.nest(
-            doc.concat([doc.soft_line, doc.concat(docs), doc.concat(dangling)]),
+            doc.concat([edge, doc.concat(docs), doc.concat(dangling)]),
             2,
           ),
-          doc.soft_line,
+          edge,
           t(close),
         ]),
       )
@@ -848,14 +870,14 @@ def item_doc(it: Item, ctx: Ctx) -> Doc {
         },
       ])
     }
-    ast.CustomType(span, d, attrs, p, opaque_, name, name_span, params, variants) -> {
+    ast.CustomType(span, d, attrs, p, opaque_, name, _, params, variants) -> {
       head =
         publicity(p) <> case opaque_ {
           True -> "opaque "
           False -> ""
         } <> "type "
-      use <- record_shorthand(ctx, it, name_span, d, attrs, head)
       head = head <> name <> type_params(params)
+      use <- record(ctx, it, d, attrs, head)
       body = case variants {
         [] -> t(" {}")
         _ ->
@@ -905,26 +927,63 @@ def item_doc(it: Item, ctx: Ctx) -> Doc {
   }
 }
 
-/// `type Name(fields)` stays in that form: the parser gives its constructor
-/// a span starting at the type's name, which a constructor written inside
-/// `{ ... }` can't have.
-def record_shorthand(
+/// `type Name { field: Type, ... }` stays a record: the parser gives the
+/// record's constructor a span starting at the `{`, which a constructor
+/// written `Name(...)` can't have.
+def record(
   ctx: Ctx,
   it: Item,
-  name_span: Span,
   d: List(String),
   attrs: List(ast.Attribute),
   head: String,
   otherwise: fn() -> Doc,
 ) -> Doc {
   case it {
-    ast.CustomType(span:, params: [], variants: [v] | _) if v.span.start == name_span.start ->
-      doc.concat([
-        docs(d),
-        attributes(attrs),
-        el(ctx, span, v.span, doc.concat([t(head), variant_doc(v, ctx)])),
-      ])
+    ast.CustomType(span:, name:, variants: [v] | _) if v.name == name -> case written_as_record(
+      ctx,
+      v,
+    ) {
+      True -> {
+        fields = list.map(v.fields, fn(f) { (f.span, field_doc(f), ",") })
+        // Written one field per line, it stays that way (like a type with
+        // constructors); otherwise it's one line when it fits.
+        edge = case fields_on_their_own_lines(ctx, v) {
+          True -> doc.hard_line
+          False -> doc.line
+        }
+        body = padded_seq(ctx, v.span, "{", fields, "}", True, edge)
+        doc.concat([
+          docs(d),
+          attributes(attrs),
+          el(ctx, span, v.span, doc.concat([t(head <> " "), body])),
+        ])
+      }
+      False -> otherwise()
+    }
     _ -> otherwise()
+  }
+}
+
+/// A record's constructor starts at its `{` (see `parser.record`).
+def written_as_record(ctx: Ctx, v: ast.Variant) -> Bool {
+  bit_array.slice(ctx.src, v.span.start, 1) == Ok(<<"{">>)
+}
+
+def fields_on_their_own_lines(ctx: Ctx, v: ast.Variant) -> Bool {
+  case v.fields {
+    [first | _] -> line_of(ctx, first.span.start) > line_of(ctx, v.span.start)
+    [] -> False
+  }
+}
+
+def line_of(ctx: Ctx, offset: Int) -> Int {
+  span.position(ctx.index, offset).line
+}
+
+def field_doc(f: ast.Field) -> Doc {
+  case f.label {
+    Some(l) -> doc.concat([t(l <> ": "), type_doc(f.type_)])
+    None -> type_doc(f.type_)
   }
 }
 

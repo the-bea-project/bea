@@ -1,4 +1,0 @@
-pub def main() {
-  name = "x"
-  "#{name"
-}

@@ -28,11 +28,9 @@ pub type Command {
 
 /// The options `bea pack` passes to gleepack. `targets` are gleepack target
 /// slugs, such as `amd64-linux-otp-29.1.1`.
-pub type Options(
-  output: Option(String),
-  module: Option(String),
-  targets: List(String),
-)
+pub type Options {
+  Options(output: Option(String), module: Option(String), targets: List(String))
+}
 
 /// Where gleepack comes from.
 pub type Packer {

@@ -1,4 +1,4 @@
-//// Record shorthand: `type Point(x: Int, y: Int)` is
+//// Records: `type Point { x: Int, y: Int }` is
 //// `type Point { Point(x: Int, y: Int) }`.
 
 import gleam/int
@@ -6,11 +6,16 @@ import gleam/io
 import gleam/string
 
 /// A point on the grid.
-pub type Point(x: Int, y: Int)
+pub type Point { x: Int, y: Int }
 
-type Celsius(Float)
+type Celsius { degrees: Float }
 
-pub opaque type Email(address: String)
+pub opaque type Email {
+  address: String,
+}
+
+/// Generic records take their parameters as usual.
+pub type Tagged(value) { tag: String, value: value }
 
 /// The long form, for comparison: both behave the same.
 pub type Pair {
@@ -66,6 +71,10 @@ pub def main() {
   Pair(a, b) = Pair(Pair(1, 2) | y: 5)
   io.println(int.to_string(a + b))
   io.println(string.inspect(warm(Celsius(25.0))))
+  tagged = Tagged(tag: "answer", value: 42)
+  Tagged(tag:, value:) = Tagged(tagged | value: tagged.value + 1)
+  io.println("#{tag}: #{int.to_string(value)}")
+  io.println(Tagged("pi", 3.14).value |> string.inspect)
   case email("bea@example.com") {
     Ok(e) -> io.println(email_address(e))
     Error(message) -> io.println(message)

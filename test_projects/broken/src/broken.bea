@@ -1,7 +1,0 @@
-import broken/dup
-import broken/types.{type Point}
-
-pub def main() {
-  p: Point = types.origin()
-  dup.x() + p.x + Point.missing()
-}

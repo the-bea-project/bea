@@ -399,9 +399,20 @@ def strip_ansi_tail(prefix: String) -> String {
 /// the originals in the source directory.
 def rewrite_copies(r: Rewriter, line: String) -> String {
   build_src = r.build_dir <> "/src/"
-  case string.contains(line, build_src) {
+  build_test = r.build_dir <> "/test/"
+  line = case string.contains(line, build_src) {
     True ->
       string.replace(line, build_src, project.display_path(r.src_dir) <> "/")
+    False -> line
+  }
+  // Tests are copied from the project's test/ (see project.sync_tests).
+  case string.contains(line, build_test) {
+    True ->
+      string.replace(
+        line,
+        build_test,
+        project.display_path(project.dirname(r.build_dir) <> "/test") <> "/",
+      )
     False -> line
   }
 }

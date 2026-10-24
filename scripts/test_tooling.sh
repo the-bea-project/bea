@@ -13,6 +13,7 @@
 #      where the executable goes, errors.
 #   6. (opt-in, BEA_TEST_GLEEPACK=1) `bea pack` with the real gleepack (on
 #      the PATH or in BEA_GLEEPACK), and the executable it builds.
+#   7. `bea test`: running a project's tests from its root, failures, errors.
 #
 # The tool is test_projects/tooling/fixture_tool, a small Gleam package that
 # behaves like Marmot (reads [tools.<name>] from gleam.toml, generates code
@@ -344,7 +345,7 @@ if [ "${BEA_TEST_GLEEPACK:-}" = "1" ]; then
   cat >"$G/src/packed_app.bea" <<'BEA'
 import argv
 
-pub type Greeting(name: String, loud: Bool)
+pub type Greeting { name: String, loud: Bool }
 
 def render(Greeting(name:, loud: True)) {
   string.uppercase("hello, #{name}!")
@@ -374,6 +375,48 @@ BEA
 else
   echo "SKIP gleepack tests (set BEA_TEST_GLEEPACK=1; they need gleepack)"
 fi
+
+# --- 7. bea test ---------------------------------------------------------------------
+
+T="$ROOT/tested app"
+(cd "$ROOT" && $BEA new tested_app >/dev/null && mv tested_app "$T")
+run "$T" $BEA test
+check "bea test without tests says how to add them" \
+  '[ $code -ne 0 ] && has "$err" "test/tested_app_test.gleam" && has "$err" "gleeunit"'
+(cd "$T" && $BEA add --dev gleeunit >/dev/null 2>&1 && $BEA add simplifile >/dev/null 2>&1)
+mkdir -p "$T/test/tested_app"
+printf 'hello\n' >"$T/data.txt"
+cat >"$T/test/tested_app_test.gleam" <<'GLEAM'
+import gleeunit
+import simplifile
+import tested_app/helper
+
+pub fn main() {
+  gleeunit.main()
+}
+
+pub fn reads_from_the_project_root_test() {
+  let assert Ok("hello\n") = simplifile.read("data.txt")
+}
+
+pub fn helper_test() {
+  assert helper.double(2) == 4
+}
+GLEAM
+printf 'pub fn double(x: Int) -> Int {\n  x * 2\n}\n' >"$T/test/tested_app/helper.gleam"
+run "$T" $BEA test
+check "bea test runs the tests from the project root" \
+  '[ $code -eq 0 ] && has "$out" "2 passed, no failures"'
+sed -i 's/== 4/== 5/' "$T/test/tested_app_test.gleam"
+run "$T" $BEA test
+check "bea test fails when a test fails" \
+  '[ $code -ne 0 ] && has "$out" "1 failures"'
+printf 'pub fn broken_test() {\n  1 + "x"\n}\n' >>"$T/test/tested_app_test.gleam"
+run "$T" $BEA test
+check "bea test: type errors in tests are reported on test/" \
+  '[ $code -ne 0 ] && has "$err" "test/tested_app_test.gleam:"'
+run "$T" $BEA test --help
+check "bea test --help" '[ $code -eq 0 ] && has "$out" "Usage: bea test"'
 
 echo
 if [ "$failures" -eq 0 ]; then echo "All tooling tests passed"; else echo "$failures test(s) failed"; exit 1; fi

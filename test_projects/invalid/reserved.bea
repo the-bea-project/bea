@@ -1,5 +1,0 @@
-pub def main() {
-  test = 1
-  macro = test
-  macro
-}

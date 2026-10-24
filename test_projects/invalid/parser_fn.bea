@@ -1,7 +1,0 @@
-pub fn main() {
-  Nil
-}
-
-pub def ok() {
-  1
-}

@@ -1,4 +1,0 @@
-pub def main() {
-  x = 1 § 2
-  x
-}

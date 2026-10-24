@@ -28,7 +28,7 @@ import gleam/result
 import gleam/string
 import simplifile
 
-pub const version = "0.2.0"
+pub const version = "0.3.0"
 
 pub def main(args: List(String)) -> Int {
   case args {
@@ -58,6 +58,7 @@ pub def main(args: List(String)) -> Int {
     ["transpile" | rest] -> transpile(rest)
     ["export" | rest] -> passthrough(["export" | rest], True)
     ["pack" | rest] -> pack_command(rest)
+    ["test" | rest] -> test_command(rest)
     ["publish" | rest] -> publish(rest)
     ["hex" | rest] -> passthrough(["hex" | rest], False)
     ["shell" | _] | ["repl" | _] -> shell_command()
@@ -117,6 +118,11 @@ def help() -> String {
     heading("Building"),
     command("check", "", "Type check the project"),
     command("build", "", "Build the project"),
+    command(
+      "test",
+      "[ARGS]",
+      "Run the project's tests (test/<package>_test.gleam)",
+    ),
     command(
       "run",
       "[-m MOD] [ARGS]",
@@ -927,6 +933,52 @@ def scratch_project() -> Result(Project, Nil) {
 
 /// Bea packages are published to Hex as the Gleam code they compile to, so
 /// both Gleam and Bea projects can depend on them.
+const test_help = "Usage: bea test [OPTIONS] [ARGS]
+
+Run the project's tests: the `main` of test/<package>_test.gleam (with
+gleeunit, for example), built with the project and run from the project
+root, so tests read files relative to it. The project's test/ holds Gleam
+test modules and FFI files.
+
+Options are those of `bea run` (--target, --runtime, and flags for the
+build); the remaining arguments are passed to the tests."
+
+/// `bea test`: the project's tests, run like `bea run -m <package>_test`.
+def test_command(args: List(String)) -> Int {
+  case entrypoint.parse_run_args(args) {
+    Error(message) -> {
+      error(message)
+      1
+    }
+    Ok(a) if a.help -> {
+      io.println(test_help)
+      0
+    }
+    Ok(a) if a.module != None or a.file != None -> {
+      error(
+        "`bea test` runs the project's tests module; use `bea run -m` for another module",
+      )
+      1
+    }
+    Ok(a) -> {
+      use p <- or_exit(current_project())
+      module = p.name <> "_test"
+      case system.file_exists(p.root <> "/test/" <> module <> ".gleam") {
+        True -> run_parsed(entrypoint.RunArgs(a | module: Some(module)))
+        False -> {
+          error(
+            "No tests: `bea test` runs the `main` of test/" <> module <> ".gleam",
+          )
+          system.print_stderr(
+            "hint: add test/" <> module <> ".gleam, e.g. with gleeunit (`bea add --dev gleeunit`):\n\n    import gleeunit\n\n    pub fn main() {\n      gleeunit.main()\n    }\n",
+          )
+          1
+        }
+      }
+    }
+  }
+}
+
 /// `bea pack`: the project as a standalone executable, built by gleepack in
 /// the generated Gleam project (see bea/pack).
 def pack_command(args: List(String)) -> Int {

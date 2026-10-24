@@ -501,12 +501,14 @@ pub def sync_cached(
     Nil
   })
 
+  written_tests = sync_tests(project)
+
   (
     Sync(
       modules,
       list.reverse(errors),
       list.reverse(warnings),
-      written_copies,
+      list.append(written_copies, written_tests),
       ctx,
     ),
     Cache(
@@ -514,6 +516,46 @@ pub def sync_cached(
       list.map(gleam_modules, fn(g) { (g.0, (g.1, g.2)) }) |> dict.from_list,
     ),
   )
+}
+
+/// Mirrors the project's `test/` into the build directory: its Gleam
+/// modules and FFI files, unchanged. Gleam compiles a project's tests along
+/// with it, and `bea test` runs them. Returns the files written. (Script
+/// mode has no tests.)
+def sync_tests(project: Project) -> List(String) {
+  case project.script {
+    True -> []
+    False -> {
+      source = project.root <> "/test"
+      dest = project.build_dir <> "/test"
+      files = source_files(source) |> list.filter(is_passthrough)
+      copies = list.map(files, fn(path) {
+        to = dest <> "/" <> string.drop_start(path, string.length(source) + 1)
+        changed = case simplifile.read(path) {
+          Ok(content) -> write_if_changed(to, content)
+          Error(_) -> {
+            _ = simplifile.create_directory_all(dirname(to))
+            _ = simplifile.copy_file(path, to)
+            True
+          }
+        }
+        (to, changed)
+      })
+      keep = set.from_list(list.map(copies, fn(c) { c.0 }))
+      source_files(dest)
+      |> list.filter(fn(f) { is_passthrough(f) and not set.contains(keep, f) })
+      |> list.each(fn(f) {
+        _ = simplifile.delete(f)
+        Nil
+      })
+      list.filter_map(copies, fn(c) {
+        case c.1 {
+          True -> Ok(c.0)
+          False -> Error(Nil)
+        }
+      })
+    }
+  }
 }
 
 def gleam_module_name(project: Project, path: String) -> String {

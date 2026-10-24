@@ -499,122 +499,117 @@ def type_definition(
   ts: Tokens,
 ) -> Parsed(Item) {
   use ((name, name_span), ts) <- result.try(expect_upname(ts, "a type name"))
-  case record_shorthand(ts) {
-    True ->
-      record_shorthand_type(
-        start,
-        attrs,
-        publicity,
-        opaque_,
-        name,
-        name_span,
-        ts,
+  type_definition_rest(start, attrs, publicity, opaque_, name, name_span, ts)
+}
+
+/// A type parameter: a lowercase name. A field or a type there is a record
+/// or a wrapper written the way other languages do, so say how Bea does it.
+def type_parameter(name: String, ts: Tokens) -> Parsed(String) {
+  case ts {
+    [Token(lexer.Name(n), _, _), Token(lexer.Colon, s, _) | _] ->
+      Error(
+        diagnostic.error(
+          "Unexpected `:`",
+          s,
+          "type parameters are names; a record's fields go in braces",
+        )
+        |> diagnostic.with_hint(
+          "Write `type " <> name <> " { " <> n <> ": ... }` for a record.",
+        ),
       )
-    False ->
-      type_definition_rest(
-        start,
-        attrs,
-        publicity,
-        opaque_,
-        name,
-        name_span,
-        ts,
+    [Token(lexer.UpName(n), s, _) | _] ->
+      Error(
+        diagnostic.error(
+          "Unexpected type `" <> n <> "`",
+          s,
+          "type parameters are lowercase names",
+        )
+        |> diagnostic.with_hint(
+          "A type wrapping a value is written in full: `type " <> name <> " { " <> name <> "(" <> n <> ") }`.",
+        ),
       )
+    _ -> {
+      use ((n, _), ts) <- result.try(expect_name(ts, "a type parameter"))
+      Ok((n, ts))
+    }
   }
 }
 
-/// `type Name(...)` is record shorthand when the parentheses hold something
-/// other than bare lowercase names: `type Point(x: Float)`, `type Id(Int)`.
-/// Bare names (`type Box(a)`) keep meaning type parameters.
-def record_shorthand(ts: Tokens) -> Bool {
-  case ts {
-    [Token(lexer.LParen, _, False) | rest] -> not only_type_params(rest)
+/// Does a type's body hold a record's fields (`name: Type`) rather than
+/// constructors (which start with an uppercase name)?
+def record_body(ts: Tokens) -> Bool {
+  case relabel(ts) {
+    [Token(lexer.Name(_), _, _), Token(lexer.Colon, _, _) | _] -> True
     _ -> False
   }
 }
 
-/// Is what follows an opening paren a list of type parameters `a, b)`?
-def only_type_params(ts: Tokens) -> Bool {
-  case ts {
-    [Token(lexer.RParen, _, _) | _] -> True
-    [Token(lexer.Name(_), _, _), Token(lexer.RParen, _, _) | _] -> True
-    [Token(lexer.Name(_), _, _), Token(lexer.Comma, _, _) | rest] ->
-      only_type_params(rest)
-    _ -> False
-  }
-}
-
-/// `type Name(fields)`: the type has a single constructor named like it,
-/// exactly as if written `type Name { Name(fields) }`. The constructor's span
-/// starts at the type's name (the name is the constructor's too), which is
-/// how the formatter tells the two forms apart.
-def record_shorthand_type(
+/// `type Name(params) { field: Type, ... }`: a record, the type with a
+/// single constructor named like it, exactly as if written
+/// `type Name(params) { Name(field: Type, ...) }`. The constructor's span
+/// starts at the `{`, which is how the formatter tells the two forms apart.
+def record(
   start: Span,
   attrs: List(Attribute),
   publicity: ast.Publicity,
   opaque_: Bool,
   name: String,
   name_span: Span,
+  params: List(String),
+  open: Span,
   ts: Tokens,
 ) -> Parsed(Item) {
-  use (_, ts) <- result.try(expect(ts, lexer.LParen, "`(`"))
   use ((fields, close), ts) <- result.try(
-    sequence(ts, lexer.RParen, "`)`", field, []),
+    sequence(ts, lexer.RBrace, "`}`", record_field(name, _), []),
   )
-  type_variable =
-    list.flat_map(fields, fn(f) { type_variables(f.type_) }) |> list.first
-  case type_variable, ts {
-    Ok((var, s)), _ ->
-      Error(
-        diagnostic.error(
-          "Type parameter in record shorthand",
-          s,
-          "`" <> var <> "` is a type parameter, which record shorthand can't declare",
-        )
-        |> diagnostic.with_hint(
-          "Declare generic types in full: `type " <> name <> "(" <> var <> ") { " <> name <> "(...) }`.",
-        ),
-      )
-    _, [Token(lexer.LBrace, s, _) | _] | _, [Token(lexer.Eq, s, _) | _] ->
-      Error(
-        diagnostic.error(
-          "Unexpected body",
-          s,
-          "a record shorthand type has no body",
-        )
-        |> diagnostic.with_hint(
-          "Write either `type " <> name <> "(...)` or `type " <> name <> " { " <> name <> "(...) }`.",
-        ),
-      )
-    _, _ -> {
-      variant = ast.Variant(sp(name_span, close.span), name, fields, [])
-      Ok(
-        (
-          ast.CustomType(
-            sp(start, close.span),
-            [],
-            attrs,
-            publicity,
-            opaque_,
-            name,
-            name_span,
-            [],
-            [variant],
-          ),
-          ts,
-        ),
-      )
-    }
-  }
+  variant = ast.Variant(sp(open, close.span), name, fields, [])
+  Ok(
+    (
+      ast.CustomType(
+        sp(start, close.span),
+        [],
+        attrs,
+        publicity,
+        opaque_,
+        name,
+        name_span,
+        params,
+        [variant],
+      ),
+      ts,
+    ),
+  )
 }
 
-def type_variables(t: Type) -> List((String, Span)) {
-  case t {
-    ast.VarType(s, n) -> [(n, s)]
-    ast.NamedType(args: | _) -> list.flat_map(args, type_variables)
-    ast.TupleType(_, elements) -> list.flat_map(elements, type_variables)
-    ast.FnType(_, params, ret) -> list.flat_map([ret | params], type_variables)
-    ast.HoleType(| _) -> []
+/// A record's field: always labelled.
+def record_field(name: String, ts: Tokens) -> Parsed(Field) {
+  case relabel(ts) {
+    [Token(lexer.Name(_), _, _), Token(lexer.Colon, _, _) | _] -> field(ts)
+    [Token(lexer.UpName(n), s, _), Token(lexer.LParen, _, False) | _] ->
+      Error(
+        diagnostic.error(
+          "Not a field",
+          s,
+          "`" <> n <> "(...)` has no name: a record's fields are `name: Type`, and a record has no other constructors",
+        )
+        |> diagnostic.with_hint(
+          "Name the field, or write the type's constructors in full: `type " <> name <> " { " <> name <> "(...) " <> n <> "(...) }`.",
+        ),
+      )
+    _ -> case type_(ts) {
+      Ok((t, _)) ->
+        Error(
+          diagnostic.error(
+            "Unlabelled field",
+            t.span,
+            "a record's fields have names, like `name: Type`",
+          )
+          |> diagnostic.with_hint(
+            "Name the field, or write the constructor in full for positional fields: `type " <> name <> " { " <> name <> "(...) }`.",
+          ),
+        )
+      Error(_) -> Error(unexpected(peek(ts), "a field like `name: Type`"))
+    }
   }
 }
 
@@ -631,18 +626,7 @@ def type_definition_rest(
     case ts {
       [Token(lexer.LParen, _, False) | rest] -> {
         use ((ps, close), rest) <- result.try(
-          sequence(
-            rest,
-            lexer.RParen,
-            "`)`",
-            fn(ts) {
-              use ((n, _), ts) <- result.try(
-                expect_name(ts, "a type parameter"),
-              )
-              Ok((n, ts))
-            },
-            [],
-          ),
+          sequence(rest, lexer.RParen, "`)`", type_parameter(name, _), []),
         )
         Ok(((ps, close.span), rest))
       }
@@ -679,24 +663,38 @@ def type_definition_rest(
           )
       }
     }
-    [Token(lexer.LBrace, _, _) | rest] -> {
-      use ((variants, close), rest) <- result.try(variants(rest, []))
-      Ok(
-        (
-          ast.CustomType(
-            sp(start, close),
-            [],
-            attrs,
-            publicity,
-            opaque_,
-            name,
-            name_span,
-            params,
-            variants,
-          ),
+    [Token(lexer.LBrace, open, _) | rest] -> case record_body(rest) {
+      True ->
+        record(
+          start,
+          attrs,
+          publicity,
+          opaque_,
+          name,
+          name_span,
+          params,
+          open,
           rest,
-        ),
-      )
+        )
+      False -> {
+        use ((variants, close), rest) <- result.try(variants(rest, []))
+        Ok(
+          (
+            ast.CustomType(
+              sp(start, close),
+              [],
+              attrs,
+              publicity,
+              opaque_,
+              name,
+              name_span,
+              params,
+              variants,
+            ),
+            rest,
+          ),
+        )
+      }
     }
     _ ->
       Ok(
