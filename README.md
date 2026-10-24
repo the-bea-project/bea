@@ -1,6 +1,16 @@
 # Bea
 
-Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It compiles to plain, readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and JavaScript), the whole Hex ecosystem and Gleam's language server for free — while borrowing ergonomics from Elixir:
+<p align="center">
+  <img src="beatrix.svg" alt="Beatrix — Bea mascot" width="180">
+</p>
+
+<h1 align="center">Bea</h1>
+
+<p align="center">
+  An ergonomic language that transpiles to Gleam.
+</p>
+
+>Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It compiles to plain, readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and JavaScript), the whole Hex ecosystem and Gleam's language server for free — while borrowing ergonomics from Elixir:
 
 - multi-clause functions with pattern matching and guards
 - early `return`, `?` for error propagation, and `else` guards
@@ -82,6 +92,7 @@ my_app/
 | `bea update [PKG...]` | Update dependencies |
 | `bea deps list\|download\|tree` | Inspect dependencies |
 | `bea check` | Type check |
+| `bea test [ARGS]` | Run the project's tests: the `main` of `test/<package>_test.gleam` (gleeunit, ...), from the project root |
 | `bea build` | Build (`--target javascript`, `--warnings-as-errors`, ...) |
 | `bea run [-m MODULE \| FILE.bea] [ARGS]` | Run a module's `main`: the project's, or a dependency's such as a Gleam tool (`bea run -m marmot migrate`) |
 | `bea format [--check] [--stdin] [--imports] [PATHS]` | Format `.bea` files (`--imports` also organises imports) |
@@ -89,6 +100,7 @@ my_app/
 | `bea transpile FILE.bea` | Print the Gleam generated for a file (`--stdin` reads the source from stdin) |
 | `bea transpile --out DIR` | Write the project out as a plain Gleam project ("eject") |
 | `bea export erlang-shipment\|escript\|...` | Gleam's export commands |
+| `bea pack [-o PATH] [-m MODULE] [-t TARGET]` | Package the project into one standalone executable, with [gleepack](https://github.com/yoshi-monster/gleepack) |
 | `bea publish` | Publish to Hex (as the generated Gleam package) |
 | `bea hex ...` | Hex account commands |
 | `bea clean` | Delete `.beabuild/` |
@@ -276,11 +288,43 @@ Bea projects depend on Gleam packages the same way. Fill in `description`,
 `licences` and `repository` in `bea.toml` first; `README.md`, `LICENCE` and
 `CHANGELOG.md` are included automatically.
 
+### Standalone executables: `bea pack`
+
+`bea pack` packages the project into a single executable with
+[gleepack](https://github.com/yoshi-monster/gleepack): the compiled project,
+its dependencies and a small Erlang runtime in one file, which runs on
+machines without Erlang. It suits CLIs, TUIs and dev tools on the Erlang
+target (gleepack's own limits apply: no NIFs, a read-only `priv`).
+
+```sh
+bea pack                          # build/<package>, runs the package's main
+bea pack -o dist/app              # somewhere else (relative to where you are)
+bea pack -m app/cli               # another module's main
+bea pack -t amd64-linux-otp-29.1.1 -t aarch64-macos-otp-29.1.1   # cross-build
+```
+
+gleepack is the `gleepack` executable on the PATH (from its
+[releases](https://github.com/yoshi-monster/gleepack/releases)), or the one
+`BEA_GLEEPACK` names, or a dev dependency of the project:
+
+```toml
+[dev_dependencies]
+gleepack = { git = "https://github.com/yoshi-monster/gleepack.git", ref = "main" }
+```
+
+Bea builds the project first, so errors point at your `.bea` files, then runs
+gleepack on the generated Gleam project. gleepack's settings go in
+`bea.toml` under `[tools.gleepack]` (`output`, relative to the project root,
+`module` and `targets`); the command line wins over them.
+
 ### Building a standalone `bea` binary
 
-The CLI is a normal Gleam program (`bea.main`). Package it with gleepack, or
-with `gleam export erlang-shipment`. For development, `scripts/bea` runs the
-CLI straight from this checkout after `gleam build`.
+Bea itself is a Bea project, so `bea pack` in this repository builds the
+`bea` binary, `build/bea` (see [Development](#development)). The binary
+needs no Erlang to run; Gleam (and the Erlang it needs to build Erlang
+projects) is still required for `bea build`, `run`, `check` and the like.
+`bea export erlang-shipment` works too. For development, `scripts/bea` runs
+the CLI this checkout has built.
 
 Ctrl+C works with both: `scripts/bea` starts the VM with `+Bi` and turns
 SIGINT into a SIGTERM, and gleepack's runtime does that conversion itself.
@@ -520,6 +564,34 @@ pub type Scores = Dict(String, Int)
 pub const max_players: Int = 4
 ```
 
+#### Records
+
+A type with a single constructor named like the type can list its fields
+in braces:
+
+```bea
+pub type AuthToken { sub: String, role: String }
+
+type Point { x: Float, y: Float }     // private
+
+pub opaque type Email { address: String }
+
+pub type Page(item) {                 // generic, as usual
+  items: List(item),
+  total: Int,
+}
+```
+
+Each is exactly the long form, e.g. `pub type AuthToken { AuthToken(sub:
+String, role: String) }`: the parser turns one into the other, so the
+Gleam, `@derive`, functions through the type (`AuthToken.decoder()`),
+construction (`AuthToken(sub: "u1", role: "admin")`), patterns and record
+updates are the same for both. A body starting with `name:` is a record's
+fields; one starting with an uppercase name lists constructors. Fields have
+labels, separated by commas; a type wrapping a value without a label is
+written in full, `pub type UserId { UserId(Int) }`. The formatter keeps
+whichever form you wrote, and a record on one line or one field per line.
+
 ### Deriving functions: `@derive`
 
 Decoders, encoders, form readers and the like follow the fields of a record
@@ -739,8 +811,9 @@ evaluated when the assertion fails.
   holding the `return` rather than on the line Gleam finds inconsistent,
   because Gleam sees the rest of the function as the guard's continuation.
 - Doc comments on individual record fields aren't passed on to Gleam.
-- `bea test` and `bea docs` aren't implemented; run the Gleam equivalents
-  inside `.beabuild/` if you need them.
+- `bea docs` isn't implemented; run `gleam docs build` inside `.beabuild/`
+  if you need it. Tests are Gleam modules (`bea test` runs them); test
+  modules written in Bea aren't supported yet.
 - Path dependencies (`{ path = "..." }`) are resolved from `.beabuild/`, so
   relative paths need a `../` (or use an absolute path).
 - Tools that compile the project themselves by running `gleam build` in the
@@ -834,6 +907,10 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
                                                     Type.f → f)       clauses)
 ```
 
+The compiler is written in Bea: these modules are in `src/`, and the
+repository is a Bea project like any other, built by a `bea`
+([docs/self-hosting.md](docs/self-hosting.md)).
+
 | Module | Role |
 | --- | --- |
 | `bea/lexer` | Byte-based lexer with exact spans; keeps comments; string interpolation |
@@ -851,6 +928,7 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 | `bea/gleam_output` | Rewrites Gleam CLI output to Bea locations |
 | `bea/cli` | The `bea` command |
 | `bea/entrypoint` | `bea run`: its arguments, finding the module to run (in the project or a dependency), tool configuration |
+| `bea/pack` | `bea pack`: its options, where the executable goes, finding and running gleepack |
 | `bea/style`, `bea/highlight` | The CLI's colours, and syntax highlighting of Bea and Gleam |
 | `bea/shell`, `bea/line_editor` | `bea shell`: Bea front end for GSH's evaluator, and its line editor |
 | `bea/lsp/*` | JSON, JSON-RPC transport, the proxying language server |
@@ -860,14 +938,28 @@ Set `BEA_LSP_LOG=1` to get a debug log on stderr.
 
 ## Development
 
+Bea is written in Bea, and this repository is an ordinary Bea project
+(`bea.toml`, the compiler in `src/`, Gleam tests in `test/`): building it
+needs a `bea`, such as the binary from the
+[releases](https://github.com/the-bea-project/bea/releases) page or one you
+built before. [docs/self-hosting.md](docs/self-hosting.md) explains how it
+builds itself, and how to build it without any `bea` at all.
+
 ```sh
-gleam test                      # unit tests
-gleam build && export PATH=$PWD/scripts:$PATH
+bea build                       # an installed bea builds the compiler into .beabuild/
+scripts/bea build               # ... which rebuilds itself (scripts/bea runs the checkout's build)
+scripts/bea test                # unit tests, with the compiler just built
+export PATH=$PWD/scripts:$PATH  # from here on, `bea` is this checkout's compiler
 scripts/test_examples.sh        # fixtures, exercism examples, formatter, via the CLI
-scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code (BEA_TEST_MARMOT=1: also Marmot)
+scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code, bea pack, bea test (BEA_TEST_MARMOT=1: also Marmot; BEA_TEST_GLEEPACK=1: also gleepack)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
+bea pack                        # the compiler as a standalone executable, build/bea (needs gleepack)
 ```
+
+`scripts/bea build` is what makes a change to the compiler's code
+generation reach the compiler itself: the first build is compiled by the
+`bea` you had, the second by the new compiler.
 
 `beacode/` holds Bea solutions to the Gleam exercism track; `test/fixtures/`
 holds programs with expected output that cover the remaining exercism concepts

@@ -1,0 +1,212 @@
+//// `bea pack`: the project as one standalone executable.
+////
+//// The packing is done by gleepack (https://github.com/yoshi-monster/gleepack),
+//// which bundles a Gleam project's compiled code, its dependencies, OTP and
+//// a small Erlang runtime into a single file that runs without Erlang
+//// installed. gleepack works on a Gleam project, so `bea pack` syncs the
+//// project into `.beabuild/` (as every command does), builds it there so
+//// errors point at the `.bea` files, and runs gleepack in `.beabuild/`.
+////
+//// gleepack's own settings work as usual: `[tools.gleepack]` in `bea.toml`
+//// (`output`, `module`, `targets`) ends up in `.beabuild/gleam.toml`. Only
+//// the output path is handled here, so that a relative path means the same
+//// as for every other command: relative to the directory `bea pack` runs in
+//// for `--output`, to the project root in `bea.toml`, and `build/<name>` in
+//// the project root by default.
+
+import bea/project.{type Project}
+import bea/system
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/string
+
+/// What `bea pack` was asked to do.
+pub type Command {
+  Help
+  Pack(Options)
+}
+
+/// The options `bea pack` passes to gleepack. `targets` are gleepack target
+/// slugs, such as `amd64-linux-otp-29.1.1`.
+pub type Options {
+  Options(output: Option(String), module: Option(String), targets: List(String))
+}
+
+/// Where gleepack comes from.
+pub type Packer {
+  /// A gleepack executable: `BEA_GLEEPACK`, or `gleepack` on the PATH.
+  Executable(path: String)
+  /// gleepack as a dependency of the project, run with
+  /// `gleam run -m gleepack`.
+  Dependency
+}
+
+pub const usage = "Usage: bea pack [--output PATH] [--module MODULE] [--target TARGET]..."
+
+pub def help() -> String {
+  [
+    usage,
+    "",
+    "Package the project into a standalone executable with gleepack: one file",
+    "with the compiled project, its dependencies and an Erlang runtime, which",
+    "runs where Erlang isn't installed. Erlang target only.",
+    "",
+    "Options:",
+    "  -o, --output <PATH>     Where to write the executable (default:",
+    "                          build/<package> in the project root)",
+    "  -m, --module <MODULE>   The module whose `main` the executable runs",
+    "                          (default: the package's main module)",
+    "  -t, --target <TARGET>   A gleepack target such as amd64-linux-otp-29.1.1,",
+    "                          repeatable: one executable per target, the output",
+    "                          path suffixed with the target",
+    "  -h, --help              Show this help",
+    "",
+    "The same settings can go in bea.toml under [tools.gleepack] (output is",
+    "relative to the project root there). gleepack is the `gleepack` executable",
+    "on the PATH (or $BEA_GLEEPACK), or a dev dependency of the project.",
+  ]
+  |> string.join("\n")
+}
+
+// --- Arguments ------------------------------------------------------------------
+
+pub def parse(args: List(String)) -> Result(Command, String) {
+  parse_options(args, Options(output: None, module: None, targets: []))
+}
+
+def parse_options(args: List(String), o: Options) -> Result(Command, String)
+
+def parse_options([], o) {
+  Ok(Pack(Options(o | targets: list.reverse(o.targets))))
+}
+
+def parse_options([flag | _], _) if flag == "-h" or flag == "--help" {
+  Ok(Help)
+}
+
+def parse_options([flag | rest], o) {
+  case string.split_once(flag, "=") {
+    Ok((name, value)) if name == "--output" or name == "--module" or name == "--target" ->
+      set_option(name, value, rest, o)
+    _ -> case value_flag(flag), rest {
+      Some(name), [value | rest] -> set_option(name, value, rest, o)
+      Some(_), [] -> Error("`#{flag}` needs a value")
+      None, _ -> Error("Unknown option `#{flag}`")
+    }
+  }
+}
+
+/// The long name of an option that takes a value.
+def value_flag(flag: String) -> Option(String) {
+  case flag {
+    "-o" | "--output" -> Some("--output")
+    "-m" | "--module" -> Some("--module")
+    "-t" | "--target" -> Some("--target")
+    _ -> None
+  }
+}
+
+def set_option(name: String, value: String, rest: List(String), o: Options) {
+  value != "" else Error("`#{name}` needs a value")
+  case name {
+    "--output" -> parse_options(rest, Options(o | output: Some(value)))
+    "--module" -> parse_options(rest, Options(o | module: Some(value)))
+    _ -> parse_options(rest, Options(o | targets: [value | o.targets]))
+  }
+}
+
+// --- What to run ----------------------------------------------------------------
+
+/// A setting of `[tools.gleepack]` in a configuration (a quoted string).
+pub def setting(config: String, key: String) -> Option(String) {
+  config
+  |> string.split("\n")
+  |> list.drop_while(fn(line) { string.trim(line) != "[tools.gleepack]" })
+  |> list.drop(1)
+  |> list.take_while(fn(line) {
+    not string.starts_with(string.trim(line), "[")
+  })
+  |> list.find_map(fn(line) {
+    (k, v) = string.split_once(line, "=")?
+    string.trim(k) == key else Error(Nil)
+    "\"" <> quoted = string.trim(v) else Error(Nil)
+    (value, _) = string.split_once(quoted, "\"")?
+    Ok(value)
+  })
+  |> option.from_result
+}
+
+/// The absolute path of the executable: `--output` relative to `cwd`, the
+/// configuration's relative to the project root, `build/<name>` by default.
+pub def output_path(p: Project, options: Options, cwd: String) -> String {
+  case options.output, setting(p.config, "output") {
+    Some(path), _ -> absolute(cwd, path)
+    None, Some(path) -> absolute(p.root, path)
+    None, None -> p.root <> "/build/" <> p.name
+  }
+}
+
+def absolute(base: String, path: String) -> String {
+  case path {
+    "/" <> _ -> path
+    "./" <> rest -> absolute(base, rest)
+    _ -> base <> "/" <> path
+  }
+}
+
+/// gleepack's command line for building `options` into `output`.
+pub def gleepack_args(options: Options, output: String) -> List(String) {
+  list.flatten([
+    ["build", "--output=" <> output],
+    case options.module {
+      Some(m) -> ["--module=" <> m]
+      None -> []
+    },
+    list.map(options.targets, fn(t) { "--target=" <> t }),
+  ])
+}
+
+/// The executable and arguments that run gleepack with `args`.
+pub def command(
+  packer: Packer,
+  gleam: String,
+  args: List(String),
+) -> (String, List(String)) {
+  case packer {
+    Executable(path) -> (path, args)
+    Dependency -> (gleam, ["run", "-m", "gleepack", "--" | args])
+  }
+}
+
+/// Is gleepack a package of this manifest (a dependency of the project)?
+pub def in_manifest(manifest: String) -> Bool {
+  string.contains(manifest, "name = \"gleepack\"")
+}
+
+/// Finds gleepack: `BEA_GLEEPACK`, then `gleepack` on the PATH, then the
+/// project's dependencies (`manifest` is the project's manifest.toml).
+pub def find(manifest: Option(String)) -> Result(Packer, String) {
+  case system.get_env("BEA_GLEEPACK") {
+    Ok(path) if path != "" -> case system.file_exists(path) {
+      True -> Ok(Executable(path))
+      False -> Error("BEA_GLEEPACK is set to `#{path}`, which doesn't exist")
+    }
+    _ -> case system.find_executable("gleepack") {
+      Ok(path) -> Ok(Executable(path))
+      Error(_) -> case option.map(manifest, in_manifest) {
+        Some(True) -> Ok(Dependency)
+        _ -> Error(not_found)
+      }
+    }
+  }
+}
+
+const not_found = "gleepack not found
+
+`bea pack` builds the executable with gleepack
+(https://github.com/yoshi-monster/gleepack). Either put the `gleepack`
+executable from its releases on the PATH (or set BEA_GLEEPACK to it), or add
+it to the project's dev dependencies in bea.toml:
+
+    [dev_dependencies]
+    gleepack = { git = \"https://github.com/yoshi-monster/gleepack.git\", ref = \"main\" }"

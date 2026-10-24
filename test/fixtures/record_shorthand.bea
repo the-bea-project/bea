@@ -1,0 +1,86 @@
+//// Records: `type Point { x: Int, y: Int }` is
+//// `type Point { Point(x: Int, y: Int) }`.
+
+import gleam/int
+import gleam/io
+import gleam/string
+
+/// A point on the grid.
+pub type Point { x: Int, y: Int }
+
+type Celsius { degrees: Float }
+
+pub opaque type Email {
+  address: String,
+}
+
+/// Generic records take their parameters as usual.
+pub type Tagged(value) { tag: String, value: value }
+
+/// The long form, for comparison: both behave the same.
+pub type Pair {
+  Pair(x: Int, y: Int)
+}
+
+const origin = Point(x: 0, y: 0)
+
+pub def email(address: String) -> Result(Email, String) {
+  case string.contains(address, "@") {
+    True -> Ok(Email(address:))
+    False -> Error("not an email: " <> address)
+  }
+}
+
+pub def email_address(Email(address)) {
+  address
+}
+
+// Multi-clause functions match on the constructor.
+def quadrant(Point(0, 0)) {
+  "origin"
+}
+
+def quadrant(Point(x:, y:)) if x > 0 and y > 0 {
+  "first"
+}
+
+def quadrant(Point(x: _, y: _)) {
+  "elsewhere"
+}
+
+/// Reached through the type as `Point.describe(p)`.
+pub def point_describe(p: Point) -> String {
+  "(" <> int.to_string(p.x) <> ", " <> int.to_string(p.y) <> ")"
+}
+
+def warm(Celsius(degrees)) {
+  degrees >. 20.0
+}
+
+pub def main() {
+  p = Point(3, 4)
+  Point(x:, y:) = p
+  io.println("x = #{int.to_string(x)}, y = #{int.to_string(y)}")
+  moved = Point(p | y: 10)
+  io.println(Point.describe(moved))
+  io.println(Point.describe(origin))
+  io.println(quadrant(origin))
+  io.println(quadrant(p))
+  io.println(quadrant(Point(y: -1, x: 2)))
+  io.println(string.inspect(p == Point(x: 3, y: 4)))
+  Pair(a, b) = Pair(Pair(1, 2) | y: 5)
+  io.println(int.to_string(a + b))
+  io.println(string.inspect(warm(Celsius(25.0))))
+  tagged = Tagged(tag: "answer", value: 42)
+  Tagged(tag:, value:) = Tagged(tagged | value: tagged.value + 1)
+  io.println("#{tag}: #{int.to_string(value)}")
+  io.println(Tagged("pi", 3.14).value |> string.inspect)
+  case email("bea@example.com") {
+    Ok(e) -> io.println(email_address(e))
+    Error(message) -> io.println(message)
+  }
+  case email("bea") {
+    Ok(e) -> io.println(email_address(e))
+    Error(message) -> io.println(message)
+  }
+}

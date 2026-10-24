@@ -1,0 +1,123 @@
+//// Conversions between LSP positions/URIs and Bea's byte offsets/paths.
+
+import bea/lsp/json.{type Json}
+import bea/span.{type LineIndex, type Span, Position, Span}
+import gleam/bit_array
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/string
+
+pub def uri_to_path(uri: String) -> Option(String) {
+  case uri {
+    "file://" <> rest -> {
+      path = percent_decode(rest)
+      // `file:///c:/x` on Windows.
+      path = case string.to_graphemes(path) {
+        ["/", drive, ":" | more] -> case string.contains(
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+          drive,
+        ) {
+          True -> drive <> ":" <> string.concat(more)
+          False -> path
+        }
+        _ -> path
+      }
+      Some(path)
+    }
+    _ -> None
+  }
+}
+
+pub def path_to_uri(path: String) -> String {
+  path = case string.starts_with(path, "/") {
+    True -> path
+    False -> "/" <> path
+  }
+  "file://" <> percent_encode(path)
+}
+
+def percent_decode(s: String) -> String {
+  case string.contains(s, "%") {
+    False -> s
+    True -> {
+      bytes = decode_bytes(bit_array.from_string(s), <<>>)
+      case bit_array.to_string(bytes) {
+        Ok(decoded) -> decoded
+        Error(_) -> s
+      }
+    }
+  }
+}
+
+def decode_bytes(bits: BitArray, acc: BitArray) -> BitArray {
+  case bits {
+    <<"%", a, b, rest:bytes>> -> {
+      Ok(hex) = bit_array.to_string(<<a, b>>)
+      case int.base_parse(hex, 16) {
+        Ok(n) -> decode_bytes(rest, <<acc:bits, n>>)
+        Error(_) -> decode_bytes(rest, <<acc:bits, "%":utf8, a, b>>)
+      }
+    }
+    <<c, rest:bytes>> -> decode_bytes(rest, <<acc:bits, c>>)
+    _ -> acc
+  }
+}
+
+def percent_encode(s: String) -> String {
+  encode_bytes(bit_array.from_string(s), [])
+}
+
+def encode_bytes(bits: BitArray, acc: List(String)) -> String {
+  case bits {
+    <<c, rest:bytes>> -> {
+      keep =
+        {
+          c >= 97 and c <= 122
+        } or {
+          c >= 65 and c <= 90
+        } or {
+          c >= 48 and c <= 57
+        } or c == 45 or c == 46 or c == 95 or c == 126 or c == 47
+      piece = case keep {
+        True -> {
+          Ok(ch) = bit_array.to_string(<<c>>)
+          ch
+        }
+        False -> "%" <> string.pad_start(int.to_base16(c), 2, "0")
+      }
+      encode_bytes(rest, [piece | acc])
+    }
+    _ -> string.concat(list.reverse(acc))
+  }
+}
+
+pub def to_offset(index: LineIndex, position: Json) -> Int {
+  line = json.int_at(position, ["line"]) |> option.unwrap(0)
+  character = json.int_at(position, ["character"]) |> option.unwrap(0)
+  span.utf16_offset(index, Position(line, character))
+}
+
+pub def from_offset(index: LineIndex, offset: Int) -> Json {
+  Position(line, character) = span.utf16_position(index, offset)
+  json.object([("line", json.Int(line)), ("character", json.Int(character))])
+}
+
+pub def range_to_span(index: LineIndex, range: Json) -> Span {
+  start = case json.get(range, "start") {
+    Some(p) -> to_offset(index, p)
+    None -> 0
+  }
+  end = case json.get(range, "end") {
+    Some(p) -> to_offset(index, p)
+    None -> start
+  }
+  Span(start, end)
+}
+
+pub def span_to_range(index: LineIndex, s: Span) -> Json {
+  json.object([
+    ("start", from_offset(index, s.start)),
+    ("end", from_offset(index, s.end)),
+  ])
+}

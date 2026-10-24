@@ -3,3 +3,4 @@
 /build
 **/.beabuild
 erl_crash.dump
+**/__pycache__
