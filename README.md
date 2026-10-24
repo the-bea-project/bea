@@ -1,6 +1,16 @@
 # Bea
 
-Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It compiles to plain, readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and JavaScript), the whole Hex ecosystem and Gleam's language server for free — while borrowing ergonomics from Elixir:
+<p align="center">
+  <img src="beatrix.svg" alt="Beatrix — Bea mascot" width="180">
+</p>
+
+<h1 align="center">Bea</h1>
+
+<p align="center">
+  An ergonomic language that transpiles to Gleam.
+</p>
+
+>Bea is an ergonomic language that transpiles to [Gleam](https://gleam.run). It compiles to plain, readable Gleam, so it gets Gleam's type checker, both compile targets (Erlang and JavaScript), the whole Hex ecosystem and Gleam's language server for free — while borrowing ergonomics from Elixir:
 
 - multi-clause functions with pattern matching and guards
 - early `return`, `?` for error propagation, and `else` guards

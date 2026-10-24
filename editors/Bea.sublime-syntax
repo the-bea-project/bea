@@ -1,0 +1,130 @@
+
+%YAML 1.2
+---
+name: Bea
+file_extensions:
+  - bea
+scope: source.bea
+
+contexts:
+  main:
+    - include: comments
+    - include: declarations
+    - include: keywords
+    - include: functions
+    - include: types
+    - include: strings
+    - include: numbers
+    - include: operators
+
+  comments:
+    - match: '////?.*$'
+      scope: comment.line.documentation.bea
+
+    - match: '//.*$'
+      scope: comment.line.double-slash.bea
+
+  declarations:
+    - match: '\b(pub\s+)?(def)\s+([a-z_][a-zA-Z0-9_]*)'
+      captures:
+        1: keyword.other.declaration.bea
+        2: keyword.other.declaration.bea
+        3: entity.name.function.bea
+
+    - match: '\b(pub\s+)?(opaque\s+)?(type)\s+([A-Z][a-zA-Z0-9_]*)'
+      captures:
+        1: keyword.other.declaration.bea
+        2: keyword.other.declaration.bea
+        3: entity.name.type.class.bea
+        4: entity.name.type.class.bea
+
+  keywords:
+    - match: '\b(if|else|return|case|cond|use|assert)\b'
+      scope: keyword.control.bea
+
+    - match: '\b(echo|todo|panic)\b'
+      scope: keyword.other.debug.bea
+
+    - match: '\b(and|or|not)\b'
+      scope: keyword.operator.logical.bea
+
+    - match: '\b(def|fn|pub|opaque|import|type|const|as)\b'
+      scope: keyword.other.declaration.bea
+
+    - match: '\b(True|False|Nil)\b'
+      scope: constant.language.boolean.bea
+
+    - match: '@[a-z_][a-zA-Z0-9_]*'
+      scope: storage.modifier.attribute.bea
+
+  functions:
+    - match: '\b([a-z_][a-zA-Z0-9_]*)\s*(?=\()'
+      captures:
+        1: entity.name.function.call.bea
+
+  types:
+    - match: '\b(Int|Float|String|Bool|List|Result|Option|BitArray|Nil)\b'
+      scope: support.type.primitive.bea
+
+    - match: '\b[A-Z][a-zA-Z0-9_]*\b'
+      scope: entity.name.type.bea
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.bea
+      push: double_quoted_string
+
+    - match: '`'
+      scope: punctuation.definition.string.begin.bea
+      push: raw_string
+
+  double_quoted_string:
+    - meta_scope: string.quoted.double.bea
+
+    - match: '\\.'
+      scope: constant.character.escape.bea
+
+    - match: '#\{'
+      scope: punctuation.section.embedded.begin.bea
+      push: interpolation
+
+    - match: '"'
+      scope: punctuation.definition.string.end.bea
+      pop: true
+
+  interpolation:
+    - meta_scope: meta.interpolation.bea
+    - meta_content_scope: source.bea
+
+    - match: '\}'
+      scope: punctuation.section.embedded.end.bea
+      pop: true
+
+    - include: main
+
+  raw_string:
+    - meta_scope: string.quoted.other.raw.bea
+
+    - match: '`'
+      scope: punctuation.definition.string.end.bea
+      pop: true
+
+  numbers:
+    - match: '\b0[xX][0-9a-fA-F_]+\b'
+      scope: constant.numeric.hex.bea
+
+    - match: '\b0[bB][01_]+\b'
+      scope: constant.numeric.binary.bea
+
+    - match: '\b0[oO][0-7_]+\b'
+      scope: constant.numeric.octal.bea
+
+    - match: '\b[0-9][0-9_]*\.[0-9_]*([eE][+-]?[0-9_]+)?\b'
+      scope: constant.numeric.float.bea
+
+    - match: '\b[0-9][0-9_]*\b'
+      scope: constant.numeric.integer.bea
+
+  operators:
+    - match: '(<<|>>|==|!=|>=\.|<=\.|>=|<=|>\.|<\.|\|>|<>|<-|->|\+\.|-\.|\*\.|/\.|\?|=|>|<|\+|-|\*|/|%|:|\|\||&&|\|)'
+      scope: keyword.operator.bea
