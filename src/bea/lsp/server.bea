@@ -2425,14 +2425,16 @@ def completion(
       _ -> item
     }
   }
-  // Names that only exist in the generated Gleam.
+  // Names that only exist in the generated Gleam. (Only those: a package
+  // or a name of the user's that starts with `bea_`, like `bea_codecs/…`,
+  // is offered as usual.)
   wanted = fn(item: Json) {
     label = json.string_at(item, ["label"]) |> option.unwrap("")
     kind = json.int_at(item, ["kind"]) |> option.unwrap(0)
-    not string.contains(label, placeholder) and not string.starts_with(
-      label,
-      "bea_",
-    ) and not string.contains(label, ".bea_") and not {
+    not string.contains(label, placeholder) and not list.any(
+      string.split(label, "."),
+      codegen.generated_name,
+    ) and not {
       kind == kind_variable and string.starts_with(
         label,
         "arg_",

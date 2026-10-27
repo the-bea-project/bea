@@ -64,7 +64,7 @@ pub def main(args: List(String)) -> Int {
     ["pack" | rest] -> pack_command(rest)
     ["test" | rest] -> test_command(rest)
     ["publish" | rest] -> publish(rest)
-    ["hex" | rest] -> passthrough(["hex" | rest], False)
+    ["hex" | rest] -> hex(rest)
     ["shell" | _] | ["repl" | _] -> shell_command()
     ["lsp" | _] -> lsp.main()
     [command | _] -> {
@@ -1036,6 +1036,17 @@ def pack_project(options: pack.Options) -> Int {
   }
 }
 
+/// `bea hex ...`: Gleam's Hex commands, which ask for passwords on the
+/// terminal.
+def hex(args: List(String)) -> Int {
+  use p <- or_exit(current_project())
+  use exe <- or_exit(gleam())
+  project.sync_config(p)
+  code = system.run_interactive(exe, ["hex" | args], p.build_dir)
+  project.sync_back(p, False)
+  code
+}
+
 def publish(args: List(String)) -> Int {
   use p <- or_exit(current_project())
   use _ <- or_exit(sync(p))
@@ -1060,7 +1071,8 @@ def publish(args: List(String)) -> Int {
     }
   })
   status("Publishing", p.name <> " (as Gleam code generated from Bea)")
-  code = system.run_inherit(exe, ["publish" | args], p.build_dir)
+  // Gleam asks for the Hex password on the terminal.
+  code = system.run_interactive(exe, ["publish" | args], p.build_dir)
   project.sync_back(p, False)
   code
 }

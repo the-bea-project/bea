@@ -1,7 +1,8 @@
 -module(bea_ffi).
 -export([
     app_version/1,
-    find_executable/1, run_lines/5, run_inherit/3, run_stderr_lines/5,
+    find_executable/1, run_lines/5, run_inherit/3, run_interactive/3,
+    run_stderr_lines/5,
     is_tty/0, halt/1, get_env/1, print_stderr/1, print/1, cwd/0,
     read_stdin_all/0, file_mtime/1,
     stdio_binary/0, read_line_bytes/0, read_bytes/1, write_bytes/1,
@@ -160,6 +161,9 @@ kill -KILL \"$target\" 2>/dev/null
 %% program and its arguments.
 %%   stdio:   the port's pipes are fds 0/1 (the program keeps them)
 %%   inherit: the terminal stays on fds 0-2, the port's pipes are fds 3/4
+%%   interactive: like inherit, and the program stays in Bea's session, so
+%%            it can open the terminal itself (/dev/tty), as password
+%%            prompts do (`gleam publish`, `gleam hex ...`)
 %%   stderr:  like inherit, but the program's stderr goes to the port (fd 4)
 %% (An asynchronous command's stdin is /dev/null unless redirected from a
 %% descriptor saved beforehand, hence fd 5.)
@@ -172,13 +176,18 @@ session() {
   fi
 }
 own=
-if [ \"$(session $$)\" != \"$$\" ] && command -v setsid >/dev/null 2>&1; then
+if [ \"$mode\" != interactive ] && [ \"$(session $$)\" != \"$$\" ] && command -v setsid >/dev/null 2>&1; then
   own=setsid
+fi
+if [ \"$mode\" = interactive ] && [ -t 0 ] && ! (exec 6</dev/tty) 2>/dev/null; then
+  echo \"bea: Gleam has no terminal to ask for a password on (a bea running on stock\" >&2
+  echo \"     Erlang/OTP, like scripts/bea, can't give it one). If it asks, set\" >&2
+  echo \"     HEXPM_API_KEY or run gleam in the build directory, .beabuild.\" >&2
 fi
 exec 5<&0
 case $mode in
   stderr) $own \"$@\" <&5 2>&4 3<&- 4>&- 5<&- & ;;
-  inherit) $own \"$@\" <&5 3<&- 4>&- 5<&- & ;;
+  inherit|interactive) $own \"$@\" <&5 3<&- 4>&- 5<&- & ;;
   *) $own \"$@\" <&5 5<&- & ;;
 esac
 child=$!
@@ -357,6 +366,14 @@ collect_lines(Port, State, Fun, Partial) ->
 %% inherited), so interactive programs and colours just work.
 run_inherit(Exe, Args, Cwd) ->
     Port = spawn_wrapped(<<"inherit">>, Exe, Args, Cwd, [nouse_stdio]),
+    foreground(Port, Exe, fun wait_exit/1).
+
+%% Like run_inherit, for programs that may prompt on the terminal itself.
+%% Only gleepack's runtime (the released `bea`) can give them one: stock
+%% OTP starts every port program in a session of its own, without a
+%% controlling terminal.
+run_interactive(Exe, Args, Cwd) ->
+    Port = spawn_wrapped(<<"interactive">>, Exe, Args, Cwd, [nouse_stdio]),
     foreground(Port, Exe, fun wait_exit/1).
 
 wait_exit(Port) ->

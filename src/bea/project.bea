@@ -14,6 +14,10 @@
 ////   `src/generated/sql/`): it stays where the tool wrote it, Bea only ever
 ////   writes to `.beabuild/`, and a copy is refreshed or removed whenever
 ////   its source changes or goes away, so the build never uses stale code.
+//// - `path` dependencies are written relative to `.beabuild/`, where Gleam
+////   reads `gleam.toml`. A path dependency that is itself a Bea project is
+////   synced first and Gleam gets its generated project, `<dep>/.beabuild`.
+////   `bea.toml` keeps the paths as you wrote them.
 ////
 //// Files are only rewritten when their content changes, which keeps Gleam's
 //// incremental compilation effective.
@@ -195,8 +199,25 @@ pub def dirname(path: String) -> String {
 
 /// Mirror configuration into the build directory (and manifest both ways).
 pub def sync_config(project: Project) -> Nil {
+  _ = sync_config_in(project, [normalize(project.root)], dict.new())
+  Nil
+}
+
+/// Writes `gleam.toml` and the manifest into the build directory, after
+/// syncing the project's Bea path dependencies (`ancestors` are the
+/// projects being synced already, which stops a dependency cycle). Returns
+/// the dependencies' errors, and their caches.
+def sync_config_in(
+  project: Project,
+  ancestors: List(String),
+  caches: Dict(String, Cache),
+) -> (List(FileErrors), Dict(String, Cache)) {
   _ = simplifile.create_directory_all(project.build_dir <> "/src")
-  write_if_changed(project.build_dir <> "/gleam.toml", project.config)
+  dependencies = path_dependencies(project)
+  write_if_changed(
+    project.build_dir <> "/gleam.toml",
+    gleam_config(project.config, dependencies),
+  )
   case project.script {
     True -> Nil
     False -> {
@@ -211,6 +232,199 @@ pub def sync_config(project: Project) -> Nil {
       }
     }
   }
+  dependencies
+  |> list.filter(fn(d) { d.bea and not list.contains(ancestors, d.absolute) })
+  |> list.fold(([], dict.new()), fn(acc, d) {
+    (errors, synced) = acc
+    case find(d.absolute) {
+      Ok(dependency) -> {
+        cache = dict.get(caches, d.absolute) |> result.unwrap(new_cache())
+        (sync, cache) = sync_in(dependency, dict.new(), cache, [
+          d.absolute |
+          ancestors
+        ])
+        (
+          list.append(errors, sync.errors),
+          dict.insert(synced, d.absolute, cache),
+        )
+      }
+      Error(_) -> acc
+    }
+  })
+}
+
+/// A `path = "…"` dependency of a project.
+pub type PathDependency {
+  PathDependency(
+    /// The path as `bea.toml` has it.
+    path: String,
+    /// The directory it names, absolute and normalised.
+    absolute: String,
+    /// Whether it is a Bea project (it has a `bea.toml`).
+    bea: Bool,
+    /// The path as the generated `gleam.toml` needs it: from the build
+    /// directory, to the dependency's Gleam project.
+    built: String,
+  )
+}
+
+/// The project's path dependencies (`[dependencies]` and dev
+/// dependencies). Script mode has none.
+pub def path_dependencies(project: Project) -> List(PathDependency) {
+  case project.script {
+    True -> []
+    False ->
+      dependency_lines(project.config)
+      |> list.filter_map(fn(line) { path_value(line) })
+      |> list.unique
+      |> list.map(fn(path) {
+        absolute = case string.starts_with(path, "/") {
+          True -> normalize(path)
+          False -> normalize(project.root <> "/" <> path)
+        }
+        bea = simplifile.is_file(absolute <> "/" <> config_file) == Ok(True)
+        target = case bea {
+          True -> trim_slash(path) <> "/" <> build_dir_name
+          False -> trim_slash(path)
+        }
+        built = case string.starts_with(path, "/") {
+          True -> target
+          False -> "../" <> target
+        }
+        PathDependency(path:, absolute:, bea:, built:)
+      })
+  }
+}
+
+/// The `gleam.toml` for a `bea.toml`: the same, with path dependencies
+/// pointing where Gleam, in the build directory, finds them.
+pub def gleam_config(
+  config: String,
+  dependencies: List(PathDependency),
+) -> String {
+  rewrite_paths(config, list.map(dependencies, fn(d) { (d.path, d.built) }))
+}
+
+/// `bea.toml`'s text from a `gleam.toml` Gleam changed (`bea add` & co):
+/// path dependencies back as they were written.
+pub def bea_config(
+  config: String,
+  dependencies: List(PathDependency),
+) -> String {
+  rewrite_paths(config, list.map(dependencies, fn(d) { (d.built, d.path) }))
+}
+
+/// Replaces the `path = "from"` values of dependency sections.
+def rewrite_paths(config: String, renames: List((String, String))) -> String {
+  config
+  |> string.split("\n")
+  |> list.fold(([], False), fn(acc, line) {
+    (lines, in_dependencies) = acc
+    in_dependencies = case section(line) {
+      Ok(name) -> is_dependency_section(name)
+      Error(_) -> in_dependencies
+    }
+    line = case in_dependencies, path_value(line) {
+      True, Ok(path) -> case list.key_find(renames, path) {
+        Ok(to) -> string.replace(line, "\"" <> path <> "\"", "\"" <> to <> "\"")
+        Error(_) -> line
+      }
+      _, _ -> line
+    }
+    ([line | lines], in_dependencies)
+  })
+  |> fn(acc) { acc.0 |> list.reverse |> string.join("\n") }
+}
+
+/// The lines of the dependency sections: `[dependencies]`,
+/// `[dev_dependencies]` (or `dev-dependencies`), and their `.name` tables.
+def dependency_lines(config: String) -> List(String) {
+  config
+  |> string.split("\n")
+  |> list.fold(([], False), fn(acc, line) {
+    (lines, in_dependencies) = acc
+    case section(line) {
+      Ok(name) -> (lines, is_dependency_section(name))
+      Error(_) if in_dependencies -> ([line | lines], True)
+      Error(_) -> acc
+    }
+  })
+  |> fn(acc) { list.reverse(acc.0) }
+}
+
+/// `[name]` or `[[name]]` → `name`.
+def section(line: String) -> Result(String, Nil) {
+  line = string.trim(line)
+  case string.starts_with(line, "["), string.split_once(line, "#") {
+    False, _ -> Error(Nil)
+    True, Ok((before, _)) -> section(before)
+    True, Error(_) ->
+      Ok(
+        line
+        |> string.replace("[", "")
+        |> string.replace("]", "")
+        |> string.trim,
+      )
+  }
+}
+
+def is_dependency_section(name: String) -> Bool {
+  list.any(
+    ["dependencies", "dev_dependencies", "dev-dependencies"],
+    fn(s) { name == s or string.starts_with(name, s <> ".") },
+  )
+}
+
+/// The string after `path =` on a line, if there is one.
+def path_value(line: String) -> Result(String, Nil) {
+  line = string.trim(line)
+  // `path = "…"` alone (a `[dependencies.x]` table), or inside `{ … }`.
+  rest = case string.starts_with(line, "path") {
+    True -> Ok(string.drop_start(line, 4))
+    False -> case string.split_once(line, "{") {
+      Ok((_, inline)) -> case string.split_once(inline, "path") {
+        Ok((before, after)) -> {
+          before = string.trim(before)
+          case before == "" or string.ends_with(before, ",") {
+            True -> Ok(after)
+            False -> Error(Nil)
+          }
+        }
+        Error(_) -> Error(Nil)
+      }
+      Error(_) -> Error(Nil)
+    }
+  }
+  rest = rest?
+  "=" <> rest = string.trim_start(rest) else Error(Nil)
+  "\"" <> rest = string.trim_start(rest) else Error(Nil)
+  (value, _) = string.split_once(rest, "\"")?
+  Ok(value)
+}
+
+def trim_slash(path: String) -> String {
+  case string.ends_with(path, "/") and path != "/" {
+    True -> trim_slash(string.drop_end(path, 1))
+    False -> path
+  }
+}
+
+/// An absolute path with `.` and `..` resolved.
+pub def normalize(path: String) -> String {
+  path
+  |> system.absolute_path
+  |> string.split("/")
+  |> list.fold([], fn(parts, part) {
+    case part, parts {
+      "", _ | ".", _ -> parts
+      "..", [_ | up] -> up
+      "..", [] -> []
+      _, _ -> [part | parts]
+    }
+  })
+  |> list.reverse
+  |> string.join("/")
+  |> fn(p) { "/" <> p }
 }
 
 /// Copy files Gleam may have changed (`gleam add` & co) back to the project.
@@ -228,6 +442,7 @@ pub def sync_back(project: Project, include_config: Bool) -> Nil {
       case include_config {
         True -> case simplifile.read(project.build_dir <> "/gleam.toml") {
           Ok(c) -> {
+            c = bea_config(c, path_dependencies(project))
             write_if_changed(project.root <> "/" <> config_file, c)
             Nil
           }
@@ -305,6 +520,8 @@ pub opaque type Cache {
     entries: Dict(String, CacheEntry),
     /// Gleam modules of the project: source and single constructors.
     gleam: Dict(String, (String, Set(String))),
+    /// The caches of Bea path dependencies, by directory.
+    dependencies: Dict(String, Cache),
   )
 }
 
@@ -318,7 +535,7 @@ type CacheEntry {
 }
 
 pub def new_cache() -> Cache {
-  Cache(dict.new(), dict.new())
+  Cache(dict.new(), dict.new(), dict.new())
 }
 
 @external(erlang, "bea_ffi", "hash")
@@ -329,7 +546,20 @@ pub def sync_cached(
   overrides: Dict(String, String),
   cache: Cache,
 ) -> (Sync, Cache) {
-  sync_config(project)
+  sync_in(project, overrides, cache, [normalize(project.root)])
+}
+
+def sync_in(
+  project: Project,
+  overrides: Dict(String, String),
+  cache: Cache,
+  ancestors: List(String),
+) -> (Sync, Cache) {
+  (dependency_errors, dependency_caches) = sync_config_in(
+    project,
+    ancestors,
+    cache.dependencies,
+  )
   files = source_files(project.src_dir)
   (bea_files, other_files) = list.partition(files, fn(f) {
     string.ends_with(f, ".bea")
@@ -506,7 +736,7 @@ pub def sync_cached(
   (
     Sync(
       modules,
-      list.reverse(errors),
+      list.append(dependency_errors, list.reverse(errors)),
       list.reverse(warnings),
       list.append(written_copies, written_tests),
       ctx,
@@ -514,6 +744,7 @@ pub def sync_cached(
     Cache(
       entries,
       list.map(gleam_modules, fn(g) { (g.0, (g.1, g.2)) }) |> dict.from_list,
+      dependency_caches,
     ),
   )
 }

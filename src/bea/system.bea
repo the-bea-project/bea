@@ -73,6 +73,18 @@ pub def run_lines(
 @external(erlang, "bea_ffi", "run_inherit")
 pub def run_inherit(executable: String, args: List(String), cwd: String) -> Int
 
+/// Like `run_inherit`, for programs that prompt on the terminal itself
+/// (passwords: `gleam publish`, `gleam hex ...`). They stay in Bea's
+/// session, so they can open `/dev/tty`. The released, gleepack-built `bea`
+/// can do this; with stock OTP (`scripts/bea`) the program has no terminal
+/// of its own to open.
+@external(erlang, "bea_ffi", "run_interactive")
+pub def run_interactive(
+  executable: String,
+  args: List(String),
+  cwd: String,
+) -> Int
+
 /// Run a program attached to the terminal, except that stderr is captured
 /// line by line.
 @external(erlang, "bea_ffi", "run_stderr_lines")

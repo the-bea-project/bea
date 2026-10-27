@@ -20,6 +20,7 @@ import bea/ast.{
 }
 import bea/doc.{type Doc}
 import bea/lexer
+import bea/lower
 import bea/span.{type Span}
 import gleam/dict.{type Dict}
 import gleam/int
@@ -151,6 +152,17 @@ const helper_functions = [
   ("$dict.insert", ("gleam/dict", "dict", "insert")),
   ("$float.negate", ("gleam/float", "float", "negate")),
 ]
+
+/// Whether a name exists only in generated Gleam: a variable lowering
+/// introduced (`bea_try_12`), or the alias of a helper's import
+/// (`bea_bool_guard`, `bea_bool`) when the module's own name was taken.
+/// Names users write, `bea_` or not, are never these.
+pub def generated_name(name: String) -> Bool {
+  lower.synthetic(name) or list.any(helper_functions, fn(helper) {
+    (_, (_, qualifier, f)) = helper
+    name == "bea_" <> qualifier <> "_" <> f or name == "bea_" <> qualifier
+  })
+}
 
 def import_name(i: Import) -> String {
   case i.alias {

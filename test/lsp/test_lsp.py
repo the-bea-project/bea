@@ -107,6 +107,22 @@ double(X) ->
     X * 2.
 """
         )
+    # A module whose names start with `bea_`, like Bea packages (`bea_codecs`)
+    # do: completion must offer them. Lowering `?` adds `bea_try_…` variables
+    # to the generated Gleam, which completion must not offer.
+    with open(os.path.join(project, "src", "bea_tools.bea"), "w") as f:
+        f.write(
+            """pub def bea_count(xs: List(Int)) -> Int {
+  list.length(xs)
+}
+
+pub def parse_sum(a: String, b: String) -> Result(Int, Nil) {
+  x = int.parse(a)?
+  y = int.parse(b)?
+  Ok(x + y)
+}
+"""
+        )
     return project
 
 
@@ -280,6 +296,57 @@ pub def main() {
     items = items["items"] if isinstance(items, dict) else (items or [])
     labels = [i["label"] for i in items]
     check("completion of local variable prefix", "shape" in labels, json.dumps(labels[:30]))
+
+    # Names starting with `bea_` that the user wrote are offered; only names
+    # that exist in the generated Gleam are hidden.
+    def complete(source, needle, version):
+        client.notify(
+            "textDocument/didChange",
+            {"textDocument": {"uri": doc["uri"], "version": version}, "contentChanges": [{"text": source}]},
+        )
+        p = position_of(source, needle, len(needle))
+        res = client.request("textDocument/completion", {"textDocument": {"uri": doc["uri"]}, "position": p})
+        res = res["items"] if isinstance(res, dict) else (res or [])
+        return [i["label"] for i in res]
+
+    labels = complete("import bea_t", "import bea_t", 50)
+    check("import completion offers a bea_ module", "bea_tools" in labels, json.dumps(labels[:30]))
+    source = "import bea_tools\n\npub def main() {\n  bea_tools.bea_c\n}\n"
+    labels = complete(source, "bea_tools.bea_c", 51)
+    check(
+        "completion offers a bea_ function",
+        any(l.endswith("bea_count") for l in labels),
+        json.dumps(labels[:30]),
+    )
+    tools_path = os.path.join(project, "src", "bea_tools.bea")
+    with open(tools_path) as f:
+        tools_text = f.read()
+    tools_doc = {"uri": uri(tools_path), "languageId": "bea", "version": 1, "text": tools_text}
+    client.notify("textDocument/didOpen", {"textDocument": tools_doc})
+    typed = tools_text.replace("  Ok(x + y)", "  Ok(x + bea)")
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": tools_doc["uri"], "version": 2}, "contentChanges": [{"text": typed}]},
+    )
+    res = client.request(
+        "textDocument/completion",
+        {"textDocument": {"uri": tools_doc["uri"]}, "position": position_of(typed, "Ok(x + bea", len("Ok(x + bea"))},
+    )
+    res = res["items"] if isinstance(res, dict) else (res or [])
+    labels = [i["label"] for i in res]
+    check(
+        "completion hides variables only the generated Gleam has",
+        not any(l.startswith(("bea_try_", "bea_ok_", "bea_error_", "bea_value_")) for l in labels),
+        json.dumps(labels[:30]),
+    )
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": tools_doc["uri"], "version": 3}, "contentChanges": [{"text": tools_text}]},
+    )
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 52}, "contentChanges": [{"text": text}]},
+    )
 
     # References of `n`
     rpos = position_of(text, "n = maths")

@@ -49,3 +49,5 @@ jobs:
           BEA_TEST_MARMOT: "1"
       - name: Language server tests
         run: python3 test/lsp/test_lsp.py
+      - name: Gleam's Hex password prompt (here, the message that it can't have one)
+        run: python3 test/cli/test_password_prompt.py

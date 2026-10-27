@@ -6,7 +6,29 @@ All notable changes to Bea are documented here. The format follows
 
 ## [0.4.0]
 
+### Added
+
+- **Bea projects as path dependencies.** `name = { path = "../lib" }` can
+  point at a Bea project: Bea syncs it first and gives Gleam its generated
+  project (`../lib/.beabuild`). Changes to its `.bea` files are picked up on
+  the next build, and its errors are reported with the project's own.
+
 ### Fixed
+
+- `bea publish` failed right after `Do you wish to publish this package?
+  [y/n]: y` with `Standard IO failure ... An unknown error occurred`, and
+  `bea hex authenticate` the same way: Gleam reads the Hex password from the
+  terminal (`/dev/tty`), and Bea started it in a session of its own, without
+  one. Both now leave Gleam on Bea's terminal. A `bea` running on stock
+  Erlang/OTP (`scripts/bea`) can't do that, and says so.
+- The language server never offered names starting with `bea_` that you
+  wrote: modules such as `bea_codecs/json/encoder` in `import` completion,
+  or a function called `bea_count`. It hid every `bea_` name to keep out the
+  variables lowering adds to the generated Gleam; now it hides only those.
+- `path` dependencies didn't resolve: `bea.toml` was copied into
+  `.beabuild/gleam.toml` as it was, so Gleam read `path = "../lib"`
+  relative to `.beabuild/`. Paths are now written relative to the build
+  directory, and `bea add`/`bea remove` keep them as written in `bea.toml`.
 
 - The language server crashed on the first message containing non-ASCII
   text (an accented letter or `…` in a file, a comment, a path), and the

@@ -203,6 +203,25 @@ pub def user_decoder() -> decode.Decoder(User) {
 }
 ```
 
+### Local dependencies: `path`
+
+A dependency can be a directory instead of a Hex package, a Bea project as
+well as a Gleam one:
+
+```toml
+[dependencies]
+bea_codecs = { path = "../codecs" }   # a Bea project
+my_gleam_lib = { path = "../lib" }    # a Gleam project
+```
+
+Paths are relative to `bea.toml`, as you would expect. Bea writes them
+relative to `.beabuild/` in the `gleam.toml` it generates. For a Bea project
+(a directory with a `bea.toml`), it first syncs that project and points
+Gleam at its generated Gleam project, `../codecs/.beabuild`, so a change in
+the dependency's `.bea` files is picked up on your next build, and its errors
+are reported with your own. `bea add` and `bea remove` leave the paths in
+`bea.toml` as you wrote them.
+
 ### Gleam tools and generated code
 
 `-m` also runs modules of dependencies, so Gleam tools work as they do with
@@ -287,6 +306,11 @@ packages are ordinary Gleam packages: Gleam projects can depend on them, and
 Bea projects depend on Gleam packages the same way. Fill in `description`,
 `licences` and `repository` in `bea.toml` first; `README.md`, `LICENCE` and
 `CHANGELOG.md` are included automatically.
+
+Gleam logs in to Hex and asks for your local password on the terminal, as
+`gleam publish` does; `bea hex ...` (`bea hex authenticate`, `bea hex
+revert`, ...) runs Gleam's other Hex commands the same way. In CI, or
+anywhere without a terminal, set `HEXPM_API_KEY` to a Hex API key instead.
 
 ### Standalone executables: `bea pack`
 
@@ -954,6 +978,7 @@ scripts/test_examples.sh        # fixtures, exercism examples, formatter, via th
 scripts/test_tooling.sh         # bea run -m with Gleam tools, generated code, bea pack, bea test (BEA_TEST_MARMOT=1: also Marmot; BEA_TEST_GLEEPACK=1: also gleepack)
 python3 test/lsp/test_lsp.py    # language server integration test
 python3 test/cli/test_interrupt.py  # Ctrl+C in `bea run` leaves the terminal alone
+python3 test/cli/test_password_prompt.py build/bea  # Gleam can ask for the Hex password (a packed bea)
 bea pack                        # the compiler as a standalone executable, build/bea (needs gleepack)
 ```
 
