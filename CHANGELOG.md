@@ -6,16 +6,6 @@ All notable changes to Bea are documented here. The format follows
 
 ## [0.4.0]
 
-### Added
-
-- **Built-in JSON derivers.** `bea_json/decoder` and `bea_json/encoder` come
-  with Bea: `import bea_json/decoder` and `@derive(decoder)` work in any
-  project that depends on `gleam_json`, with no deriver to copy in. Bea
-  writes them into `.beabuild/` when a module imports them; a module of the
-  same name in the project or a dependency takes precedence. Without
-  `gleam_json`, the import gets a "Missing dependency" error saying to run
-  `bea add gleam_json`.
-
 ### Fixed
 
 - The language server crashed on the first message containing non-ASCII
