@@ -4,6 +4,26 @@ All notable changes to Bea are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Bea uses
 [semantic versioning](https://semver.org/).
 
+## [0.4.0]
+
+### Added
+
+- **Built-in JSON derivers.** `bea_json/decoder` and `bea_json/encoder` come
+  with Bea: `import bea_json/decoder` and `@derive(decoder)` work in any
+  project that depends on `gleam_json`, with no deriver to copy in. Bea
+  writes them into `.beabuild/` when a module imports them; a module of the
+  same name in the project or a dependency takes precedence. Without
+  `gleam_json`, the import gets a "Missing dependency" error saying to run
+  `bea add gleam_json`.
+
+### Fixed
+
+- The language server crashed on the first message containing non-ASCII
+  text (an accented letter or `…` in a file, a comment, a path), and the
+  editor kept restarting it: on OTP 28, reading stdin in byte mode returns
+  each byte above 127 as two, so the message body overran its
+  `Content-Length` and `io:get_chars` was called with a negative count.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added
@@ -79,5 +99,6 @@ All notable changes to Bea are documented here. The format follows
 
 The version before this changelog was started.
 
+[0.4.0]: https://github.com/the-bea-project/bea/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/the-bea-project/bea/compare/417b591...v0.3.0
 [0.2.0]: https://github.com/the-bea-project/bea/tree/417b591

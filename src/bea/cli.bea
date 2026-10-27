@@ -337,7 +337,10 @@ def new(args: List(String)) -> Int {
                 "README.md",
                 "# " <> name <> "\n\nA [Bea](https://github.com/) project.\n\n```sh\nbea run   # Run the project\nbea check # Type check the project\n```\n",
               ),
-              (".gitignore", "/.beabuild\n*.beam\n*.ez\nerl_crash.dump\n"),
+              (
+                ".gitignore",
+                "/.beabuild\n*.beam\n*.ez\nerl_crash.dump\n/build\n",
+              ),
             ]
             list.each(files, fn(f) {
               full = path <> "/" <> f.0
@@ -459,6 +462,7 @@ def passthrough(args: List(String), needs_sources: Bool) -> Int {
 def clean() -> Int {
   use p <- or_exit(current_project())
   _ = simplifile.delete(p.build_dir)
+  _ = simplifile.delete(p.root <> "/build")
   status("Cleaned", project.display_path(p.build_dir))
   0
 }

@@ -446,7 +446,10 @@ read_headers(Length) ->
                         [Key, Value] ->
                             case string:lowercase(string:trim(Key)) of
                                 <<"content-length">> ->
-                                    read_headers(binary_to_integer(string:trim(Value)));
+                                    case string:to_integer(string:trim(Value)) of
+                                        {N, <<>>} when N >= 0 -> read_headers(N);
+                                        _ -> read_headers(Length)
+                                    end;
                                 _ -> read_headers(Length)
                             end;
                         _ -> read_headers(Length)
@@ -454,13 +457,29 @@ read_headers(Length) ->
             end
     end.
 
+%% Reads a message body: exactly N bytes, as Content-Length counts them.
 read_exact(N) -> read_exact(N, []).
 read_exact(0, Acc) -> {ok, iolist_to_binary(lists:reverse(Acc))};
 read_exact(N, Acc) ->
     case io:get_chars(standard_io, "", N) of
         eof -> error;
         {error, _} -> error;
-        Data -> read_exact(N - byte_size(Data), [Data | Acc])
+        Data ->
+            Bytes = latin1_bytes(Data, N),
+            read_exact(N - byte_size(Bytes), [Bytes | Acc])
+    end.
+
+%% The bytes read by a `get_chars` of at most Max in binary latin1 mode.
+%% Older OTP releases return them as they are. OTP 28 returns each byte as
+%% a latin1 character, UTF-8 encoded, so every byte above 127 comes back
+%% as two: the body of a message with any non-ASCII text grew past its
+%% Content-Length, the count went negative, and `io:get_chars` crashed the
+%% language server with a function_clause.
+latin1_bytes(Data, Max) when byte_size(Data) =< Max -> Data;
+latin1_bytes(Data, _) ->
+    case unicode:characters_to_binary(Data, utf8, latin1) of
+        Bytes when is_binary(Bytes) -> Bytes;
+        _ -> Data
     end.
 
 %% Wait for the next event for the language server main loop.

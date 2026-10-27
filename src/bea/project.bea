@@ -14,6 +14,10 @@
 ////   `src/generated/sql/`): it stays where the tool wrote it, Bea only ever
 ////   writes to `.beabuild/`, and a copy is refreshed or removed whenever
 ////   its source changes or goes away, so the build never uses stale code.
+//// - the built-in modules (`bea/builtins`: the JSON derivers
+////   `bea_json/decoder` and `bea_json/encoder`) the project imports are
+////   written to `.beabuild/src/` too, unless the project or a dependency
+////   has a module of that name
 ////
 //// Files are only rewritten when their content changes, which keeps Gleam's
 //// incremental compilation effective.
@@ -22,6 +26,7 @@
 //// file's directory acts as `src/`, with a default configuration.
 
 import bea/ast
+import bea/builtins
 import bea/codegen
 import bea/compiler
 import bea/deriving
@@ -30,6 +35,7 @@ import bea/sourcemap.{type SourceMap}
 import bea/span
 import bea/system
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -488,12 +494,26 @@ pub def sync_cached(
     }
   })
 
+  // Built-in modules the project imports and doesn't define itself.
+  own_modules =
+    list.map(parsed, fn(p) { p.1 })
+    |> set.from_list
+    |> set.union(gleam_names)
+  (builtin_paths, builtin_written, builtin_errors) = sync_builtins(
+    project,
+    parsed,
+    own_modules,
+  )
+  errors = list.append(builtin_errors, errors)
+
   // Remove generated files whose source is gone. Modules that failed to
   // compile keep their previous output so editors keep working.
   failed = list.map(errors, fn(e) {
     project.build_dir <> "/src/" <> module_name(project, e.path) <> ".gleam"
   })
-  keep = set.from_list(list.flatten([dict.keys(modules), copied, failed]))
+  keep = set.from_list(
+    list.flatten([dict.keys(modules), copied, failed, builtin_paths]),
+  )
   source_files(project.build_dir <> "/src")
   |> list.filter(fn(f) { is_passthrough(f) and not set.contains(keep, f) })
   |> list.each(fn(f) {
@@ -508,7 +528,7 @@ pub def sync_cached(
       modules,
       list.reverse(errors),
       list.reverse(warnings),
-      list.append(written_copies, written_tests),
+      list.flatten([written_copies, builtin_written, written_tests]),
       ctx,
     ),
     Cache(
@@ -516,6 +536,134 @@ pub def sync_cached(
       list.map(gleam_modules, fn(g) { (g.0, (g.1, g.2)) }) |> dict.from_list,
     ),
   )
+}
+
+/// Writes the built-in modules that the project's Bea modules import, and
+/// that neither the project nor one of its dependencies defines, compiled
+/// into the build directory. Returns their paths there, the ones written,
+/// and an error on each such import when the project doesn't depend on the
+/// package the built-in modules need.
+def sync_builtins(
+  project: Project,
+  parsed: List((String, String, String, Result(ast.Module, List(Diagnostic)))),
+  own_modules: Set(String),
+) -> (List(String), List(String), List(FileErrors)) {
+  has_dependency = depends_on(project.config, builtins.dependency)
+  (paths, written, errors) = list.fold(builtins.modules(), ([], [], []), fn(
+    acc,
+    builtin,
+  ) {
+    (paths, written, errors) = acc
+    (name, source) = builtin
+    importers = list.filter_map(parsed, fn(p) {
+      (path, _, module_source, parsed) = p
+      case parsed {
+        Ok(m) -> case import_span(m, name) {
+          Ok(s) -> Ok((path, module_source, s))
+          Error(_) -> Error(Nil)
+        }
+        Error(_) -> Error(Nil)
+      }
+    })
+    provided =
+      set.contains(own_modules, name) or dependency_defines(project, name)
+    case importers, provided, has_dependency {
+      [], _, _ | _, True, _ -> acc
+      _, False, False -> {
+        missing = list.map(importers, fn(i) {
+          (path, module_source, s) = i
+          diagnostic =
+            diagnostic.error(
+              "Missing dependency",
+              s,
+              "`" <> name <> "` is built into Bea, and needs the `" <> builtins.dependency <> "` package",
+            )
+            |> diagnostic.with_hint(
+              "Add it to the project: `bea add " <> builtins.dependency <> "`.",
+            )
+          (path, module_source, diagnostic)
+        })
+        (paths, written, list.append(errors, missing))
+      }
+      _, False, True -> {
+        gleam_path = project.build_dir <> "/src/" <> name <> ".gleam"
+        // The built-in sources are tested to compile; a failure would be a
+        // bug in Bea itself.
+        message = "built-in module " <> name <> " doesn't compile"
+        Ok(compiled) = compiler.compile(source, codegen.empty_context())
+          else panic as message
+        _ = simplifile.create_directory_all(dirname(gleam_path))
+        written = case write_if_changed(gleam_path, compiled.gleam) {
+          True -> [gleam_path | written]
+          False -> written
+        }
+        ([gleam_path | paths], written, errors)
+      }
+    }
+  })
+  // One entry per file, its diagnostics in source order.
+  file_errors =
+    errors
+    |> list.map(fn(e) { e.0 })
+    |> list.unique
+    |> list.map(fn(path) {
+      mine = list.filter(errors, fn(e) { e.0 == path })
+      source =
+        list.first(mine) |> result.map(fn(e) { e.1 }) |> result.unwrap("")
+      diagnostics =
+        list.map(mine, fn(e) { e.2 })
+        |> list.sort(fn(a, b) { int.compare(a.span.start, b.span.start) })
+      FileErrors(path, source, diagnostics)
+    })
+  (paths, written, file_errors)
+}
+
+/// Where a module imports `name`, if it does.
+def import_span(module: ast.Module, name: String) -> Result(span.Span, Nil) {
+  list.find_map(module.items, fn(item) {
+    case item {
+      ast.Import(span: s, module: m | _) if m == name -> Ok(s)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+/// Whether a downloaded dependency has a module called `name`.
+def dependency_defines(project: Project, name: String) -> Bool {
+  packages = project.build_dir <> "/build/packages"
+  case simplifile.read_directory(packages) {
+    Ok(entries) ->
+      list.any(entries, fn(package) {
+        simplifile.is_file(
+          packages <> "/" <> package <> "/src/" <> name <> ".gleam",
+        ) == Ok(True)
+      })
+    Error(_) -> False
+  }
+}
+
+/// Whether a `bea.toml` lists `package` under `[dependencies]`.
+pub def depends_on(config: String, package: String) -> Bool {
+  config
+  |> string.split("\n")
+  |> list.fold((False, False), fn(acc, line) {
+    (in_dependencies, found) = acc
+    line = string.trim(line)
+    cond {
+      string.starts_with(line, "[") -> (line == "[dependencies]", found)
+      in_dependencies and dependency_key(line) == package -> (True, True)
+      _ -> acc
+    }
+  })
+  |> fn(acc) { acc.1 }
+}
+
+/// The package a `name = "..."` (or `"name" = ...`) line declares.
+def dependency_key(line: String) -> String {
+  case string.split_once(line, "=") {
+    Ok((key, _)) -> key |> string.trim |> string.replace("\"", "")
+    Error(_) -> ""
+  }
 }
 
 /// Mirrors the project's `test/` into the build directory: its Gleam

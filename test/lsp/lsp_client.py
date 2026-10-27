@@ -40,7 +40,9 @@ class LspClient:
 
     # --- transport -------------------------------------------------------------
     def _send(self, message):
-        body = json.dumps(message).encode("utf-8")
+        # Raw UTF-8, as editors send it (not \u escapes): Content-Length
+        # counts bytes, which differ from characters for non-ASCII text.
+        body = json.dumps(message, ensure_ascii=False).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         if self.log:
             self.log(">>> " + json.dumps(message)[:400])

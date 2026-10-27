@@ -162,6 +162,28 @@ pub def main() {
         {"textDocument": {"uri": doc["uri"], "version": 101}, "contentChanges": [{"text": text}]},
     )
 
+    # Non-ASCII text: Content-Length counts bytes. The server used to crash
+    # reading a message whose body had any (OTP 28 hands stdin's bytes back
+    # as UTF-8 encoded latin1 characters, so the count overran).
+    accented = text.replace(
+        "pub def main() {",
+        "// caf\u00e9 \u2026 \u2192 \U0001F41D\npub def main() {\n  label = \"na\u00efve \u2603\"",
+    )
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 102}, "contentChanges": [{"text": accented}]},
+    )
+    hover = client.request(
+        "textDocument/hover",
+        {"textDocument": {"uri": doc["uri"]}, "position": position_of(accented, "maths.square", 7)},
+    )
+    contents = json.dumps(hover)
+    check("non-ASCII text in a message keeps the server running", "maths.square(x: Int) -> Int" in contents, contents)
+    client.notify(
+        "textDocument/didChange",
+        {"textDocument": {"uri": doc["uri"], "version": 103}, "contentChanges": [{"text": text}]},
+    )
+
     # Go to definition of `square` -> maths.bea
     definition = client.request("textDocument/definition", {"textDocument": {"uri": doc["uri"]}, "position": pos})
     d = json.dumps(definition)

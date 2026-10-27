@@ -15,7 +15,6 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:bea",
     "workspaceContains:**/bea.toml"
   ],
   "contributes": {

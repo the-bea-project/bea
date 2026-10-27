@@ -601,7 +601,7 @@ does. The compiler knows no deriver and no format.
 
 ```bea
 import gleam/json
-import my_json/decoder          // a deriver: JSON decoding
+import bea_json/decoder         // a deriver: JSON decoding, built into Bea
 
 @derive(decoder)
 pub type Credentials {
@@ -667,8 +667,37 @@ error: Unknown module value
 6 │   Event(name: String, at: Timestamp)
   │                           ^^^^^^^^^
 
-The module `my_json/decoder` does not have a `timestamp` value.
+The module `bea_json/decoder` does not have a `timestamp` value.
 ```
+
+**JSON, built in.** Bea comes with two derivers, `bea_json/decoder` and
+`bea_json/encoder`: import one and `@derive` with it, no copying. They need
+the `gleam_json` package (`bea add gleam_json`; Bea says so on the import
+when it is missing).
+
+```bea
+import bea_json/decoder
+import bea_json/encoder
+
+@derive(decoder, encoder)
+pub type User { name: String, age: Int, tags: List(String), nick: Option(String) }
+
+user = decoder.from_json(body, User.decoder())?   // or the json.DecodeError
+text = encoder.to_string(user, User.encoder())    // {"name":"Ada",...}
+```
+
+- A record is a JSON object with a key per field label. Derived decoders are
+  the standard library's `decode.Decoder`s, so they also work with
+  `json.parse`, `decode.run` and any library that takes decoders.
+- Field types: `String`, `Int`, `Float` (an integer is accepted), `Bool`,
+  `List`, `Option` (`null`; a missing key decodes as `None`), `Dict` (with
+  `String` keys for encoding), and the project's other derived records.
+- Decoding errors are the standard library's, with the path to the failing
+  value; `decoder.from_json` and `encoder.to_json`/`to_string` run them.
+
+They are ordinary Bea modules, which Bea writes into `.beabuild/` when a
+module imports them. A module of the same name in the project (or in a
+dependency) takes their place, so a project can bring its own conventions.
 
 **Writing a deriver.** A deriver exports `record`, `field` and `done`, and
 a function per type it supports. The derived function reads, with `use`:
@@ -701,8 +730,8 @@ pub def string() -> Decoder(String) {
 // int, float, bool, list, option, dict...
 ```
 
-`test_projects/deriving` has complete derivers for JSON decoding and
-encoding, and one for HTML forms written in Gleam.
+`test_projects/deriving` uses the JSON derivers and has one for HTML forms,
+written in Gleam.
 
 **For now** only records are derived (one constructor, labelled fields, not
 recursive); other types are reported, and their function can be written by
