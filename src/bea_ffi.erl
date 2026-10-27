@@ -1,5 +1,6 @@
 -module(bea_ffi).
 -export([
+    app_version/1,
     find_executable/1, run_lines/5, run_inherit/3, run_stderr_lines/5,
     is_tty/0, halt/1, get_env/1, print_stderr/1, print/1, cwd/0,
     read_stdin_all/0, file_mtime/1,
@@ -17,6 +18,12 @@ init() ->
     _ = io:setopts(standard_error, [{encoding, unicode}]),
     bea_signal:install(),
     nil.
+
+app_version(AppAtom) ->
+    case application:get_key(AppAtom, vsn) of
+        {ok, VersionStr} -> list_to_binary(VersionStr);
+        undefined -> <<"0.0.0">>
+    end.
 
 file_exists(Path) ->
     filelib:is_regular(unicode:characters_to_list(Path)).

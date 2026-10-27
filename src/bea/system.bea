@@ -4,9 +4,13 @@
 import gleam/list
 import gleam/result
 import gleam/string
+import gleam/erlang/atom
 
 @external(erlang, "bea_ffi", "init")
 pub def init() -> Nil
+
+@external(erlang, "bea_ffi", "app_version")
+pub def app_version(name: atom.Atom) -> String
 
 @external(erlang, "bea_ffi", "find_executable")
 pub def find_executable(name: String) -> Result(String, Nil)

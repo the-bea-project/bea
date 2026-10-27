@@ -27,8 +27,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import simplifile
+import gleam/erlang/atom
 
-pub const version = "0.3.0"
+
+def version() -> String {
+  system.app_version(atom.create("bea"))
+}
 
 pub def main(args: List(String)) -> Int {
   case args {
@@ -39,8 +43,8 @@ pub def main(args: List(String)) -> Int {
     ["--version"] | ["-V"] | ["version"] -> {
       io.println(
         case colour() {
-          True -> style.accent("bea") <> " " <> version
-          False -> "bea " <> version
+          True -> style.accent("bea") <> " " <> version()
+          False -> "bea " <> version()
         },
       )
       0
@@ -90,7 +94,7 @@ def help() -> String {
   [
     paint(style.accent, "bea") <> " " <> paint(
       style.dim,
-      version,
+      version(),
     ) <> " — a language that transpiles to Gleam",
     "",
     heading("Usage:") <> " bea <COMMAND> [OPTIONS]",
