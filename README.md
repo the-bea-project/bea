@@ -325,7 +325,12 @@ bea pack                          # build/<package>, runs the package's main
 bea pack -o dist/app              # somewhere else (relative to where you are)
 bea pack -m app/cli               # another module's main
 bea pack -t amd64-linux-otp-29.1.1 -t aarch64-macos-otp-29.1.1   # cross-build
+bea pack -t amd64-win32-otp-29.1.1 -o dist/app.exe                # for Windows
 ```
+
+With several targets, each executable gets its target after the name
+(`dist/app-amd64-linux-otp-29.1.1`). Executables for Windows end with `.exe`,
+whether `--output` names it or not (never `app.exe.exe`).
 
 gleepack is the `gleepack` executable on the PATH (from its
 [releases](https://github.com/yoshi-monster/gleepack/releases)), or the one

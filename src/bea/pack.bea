@@ -58,7 +58,8 @@ pub def help() -> String {
     "                          (default: the package's main module)",
     "  -t, --target <TARGET>   A gleepack target such as amd64-linux-otp-29.1.1,",
     "                          repeatable: one executable per target, the output",
-    "                          path suffixed with the target",
+    "                          path suffixed with the target. Executables for",
+    "                          Windows (amd64-win32-...) end with .exe",
     "  -h, --help              Show this help",
     "",
     "The same settings can go in bea.toml under [tools.gleepack] (output is",
@@ -119,6 +120,25 @@ def set_option(name: String, value: String, rest: List(String), o: Options) {
 
 /// A setting of `[tools.gleepack]` in a configuration (a quoted string).
 pub def setting(config: String, key: String) -> Option(String) {
+  raw_setting(config, key)
+  |> option.then(fn(value) { unquote(value) |> option.from_result })
+}
+
+/// The targets of `[tools.gleepack]`: `targets = ["a", "b"]`, on one line.
+pub def configured_targets(config: String) -> List(String) {
+  case raw_setting(config, "targets") {
+    Some("[" <> list) ->
+      list
+      |> string.split("]")
+      |> list.take(1)
+      |> list.flat_map(string.split(_, ","))
+      |> list.filter_map(fn(item) { unquote(string.trim(item)) })
+    _ -> []
+  }
+}
+
+/// A setting's value as written, after `=`.
+def raw_setting(config: String, key: String) -> Option(String) {
   config
   |> string.split("\n")
   |> list.drop_while(fn(line) { string.trim(line) != "[tools.gleepack]" })
@@ -129,11 +149,15 @@ pub def setting(config: String, key: String) -> Option(String) {
   |> list.find_map(fn(line) {
     (k, v) = string.split_once(line, "=")?
     string.trim(k) == key else Error(Nil)
-    "\"" <> quoted = string.trim(v) else Error(Nil)
-    (value, _) = string.split_once(quoted, "\"")?
-    Ok(value)
+    Ok(string.trim(v))
   })
   |> option.from_result
+}
+
+def unquote(value: String) -> Result(String, Nil) {
+  "\"" <> quoted = value else Error(Nil)
+  (value, _) = string.split_once(quoted, "\"")?
+  Ok(value)
 }
 
 /// The absolute path of the executable: `--output` relative to `cwd`, the
@@ -151,6 +175,33 @@ def absolute(base: String, path: String) -> String {
     "/" <> _ -> path
     "./" <> rest -> absolute(base, rest)
     _ -> base <> "/" <> path
+  }
+}
+
+/// The targets to build: `--target`s, else those of `[tools.gleepack]`
+/// (none: gleepack builds for the machine it runs on).
+pub def targets(p: Project, options: Options) -> List(String) {
+  case options.targets {
+    [] -> configured_targets(p.config)
+    targets -> targets
+  }
+}
+
+/// A Windows target, such as `amd64-win32-otp-29.1.1`.
+pub def windows_target(target: String) -> Bool {
+  string.contains(target, "-win32-")
+}
+
+/// What to give gleepack as the output for `output`. gleepack adds `.exe`
+/// to what it builds for Windows, so a `.exe` asked for is left to it:
+/// `--output dist/app.exe` gives `dist/app.exe`, not `dist/app.exe.exe`.
+/// (With several targets, each executable gets the target after the name:
+/// `dist/app-amd64-win32-otp-29.1.1.exe`.)
+pub def gleepack_output(output: String, targets: List(String)) -> String {
+  exe = string.ends_with(string.lowercase(output), ".exe")
+  case exe and list.any(targets, windows_target) {
+    True -> string.drop_end(output, 4)
+    False -> output
   }
 }
 

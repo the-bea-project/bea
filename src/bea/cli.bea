@@ -1020,7 +1020,9 @@ def pack_project(options: pack.Options) -> Int {
   // compiles the same Gleam for its own runtime.
   case run_gleam(p, s, ["build", "--target", "erlang"]) {
     0 -> {
-      output = pack.output_path(p, options, system.cwd())
+      output =
+        pack.output_path(p, options, system.cwd())
+        |> pack.gleepack_output(pack.targets(p, options))
       _ = simplifile.create_directory_all(project.dirname(output))
       status("Packing", p.name <> " with gleepack")
       (command, args) = pack.command(

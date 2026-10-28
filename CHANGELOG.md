@@ -15,6 +15,10 @@ All notable changes to Bea are documented here. The format follows
 
 ### Fixed
 
+- `bea pack --target amd64-win32-... --output dist/app.exe` wrote
+  `dist/app.exe.exe`: gleepack adds `.exe` to what it builds for Windows.
+  Bea now leaves the extension to it, for targets given with `--target` or
+  in `[tools.gleepack]`, so the executable is where `--output` says.
 - `bea publish` failed right after `Do you wish to publish this package?
   [y/n]: y` with `Standard IO failure ... An unknown error occurred`, and
   `bea hex authenticate` the same way: Gleam reads the Hex password from the

@@ -115,3 +115,34 @@ pub fn gleepack_dependency_test() {
   )
   assert !pack.in_manifest("packages = [\n  { name = \"gleam_stdlib\" },\n]")
 }
+
+pub fn windows_targets_get_one_exe_test() {
+  let windows = ["amd64-win32-otp-29.1.1"]
+  // gleepack adds `.exe` for Windows: `dist/app.exe` stays `dist/app.exe`.
+  assert pack.gleepack_output("/w/dist/app.exe", windows) == "/w/dist/app"
+  assert pack.gleepack_output("/w/dist/app.EXE", windows) == "/w/dist/app"
+  assert pack.gleepack_output("/w/dist/app", windows) == "/w/dist/app"
+  // With Windows among several targets, the name is the base of all of them.
+  assert pack.gleepack_output(
+      "/w/dist/app.exe",
+      ["amd64-linux-otp-29.1.1", "amd64-win32-otp-29.1.1"],
+    )
+    == "/w/dist/app"
+  // Other targets keep the name as given.
+  assert pack.gleepack_output("/w/dist/app.exe", ["amd64-linux-otp-29.1.1"])
+    == "/w/dist/app.exe"
+  assert pack.gleepack_output("/w/dist/app.exe", []) == "/w/dist/app.exe"
+}
+
+pub fn targets_from_the_configuration_test() {
+  let p =
+    project(
+      "name = \"app\"\n\n[tools.gleepack]\ntargets = [\"amd64-win32-otp-29.1.1\", \"arm64-macos-otp-29.1.1\"]\n",
+    )
+  assert pack.targets(p, options([]))
+    == ["amd64-win32-otp-29.1.1", "arm64-macos-otp-29.1.1"]
+  // --target wins.
+  assert pack.targets(p, options(["-t", "amd64-linux-otp-29.1.1"]))
+    == ["amd64-linux-otp-29.1.1"]
+  assert pack.targets(project("name = \"app\"\n"), options([])) == []
+}
