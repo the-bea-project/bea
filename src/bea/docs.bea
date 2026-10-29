@@ -1,0 +1,329 @@
+//// Static API documentation for Bea projects.
+////
+//// Documentation is extracted from the existing parser's public declarations.
+
+import bea/ast
+import bea/docs_assets
+import bea/formatter
+import bea/parser
+import bea/project.{type Project}
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/result
+import gleam/string
+import simplifile
+
+pub type Entry {
+  Entry(name: String, signature: String, documentation: String)
+}
+
+pub type Page {
+  Page(module: String, documentation: String, entries: List(Entry))
+}
+
+/// Extract the public API; undocumented public declarations are included.
+pub def extract(name: String, module: ast.Module) -> Page {
+  entries = list.flat_map(module.items, fn(item) {
+    case item {
+      ast.Function(_, name, _, clauses) -> case list.filter(clauses, fn(c) {
+        c.publicity == ast.Public
+      }) {
+        [] -> []
+        [first | _] -> {
+          signature =
+            "pub def " <> name <> "(" <> string.join(
+              list.map(first.params, fn(p) {
+                label = case p.label {
+                  Some(l) -> l <> ": "
+                  None -> ""
+                }
+                ty = case p.annotation {
+                  Some(t) -> formatter.type_to_string(t)
+                  None -> "_"
+                }
+                label <> ty
+              }),
+              ", ",
+            ) <> ")" <> case first.return_type {
+              Some(t) -> " -> " <> formatter.type_to_string(t)
+              None -> ""
+            }
+          [Entry(name, signature, string.join(first.doc, "\n"))]
+        }
+      }
+      ast.CustomType(_, docs, _, ast.Public, opaque_, name, _, params, variants) -> {
+        header =
+          "pub " <> case opaque_ {
+            True -> "opaque type "
+            False -> "type "
+          } <> name <> type_params(params)
+        variants = case opaque_ {
+          True -> ""
+          False ->
+            " { " <> string.join(
+              list.map(variants, fn(v) {
+                v.name <> case v.fields {
+                  [] -> ""
+                  fields ->
+                    "(" <> string.join(
+                      list.map(fields, fn(f) {
+                        case f.label {
+                          Some(l) -> l <> ": "
+                          None -> ""
+                        } <> formatter.type_to_string(f.type_)
+                      }),
+                      ", ",
+                    ) <> ")"
+                }
+              }),
+              " | ",
+            ) <> " }"
+        }
+        [Entry(name, header <> variants, string.join(docs, "\n"))]
+      }
+      ast.TypeAlias(_, docs, _, ast.Public, name, _, params, ty) ->
+        [
+          Entry(
+            name,
+            "pub type " <> name <> type_params(
+              params,
+            ) <> " = " <> formatter.type_to_string(ty),
+            string.join(docs, "\n"),
+          ),
+        ]
+      ast.ExternalType(_, docs, _, ast.Public, name, _, params) ->
+        [
+          Entry(
+            name,
+            "pub type " <> name <> type_params(params),
+            string.join(docs, "\n"),
+          ),
+        ]
+      ast.Const(_, docs, _, ast.Public, name, _, annotation, _) ->
+        [
+          Entry(
+            name,
+            "pub const " <> name <> case annotation {
+              Some(t) -> ": " <> formatter.type_to_string(t)
+              None -> ""
+            },
+            string.join(docs, "\n"),
+          ),
+        ]
+      _ -> []
+    }
+  })
+  Page(name, string.join(module.module_doc, "\n"), entries)
+}
+
+def type_params(params: List(String)) -> String {
+  case params {
+    [] -> ""
+    _ -> "(" <> string.join(params, ", ") <> ")"
+  }
+}
+
+/// Escape untrusted source comments and signatures before emitting HTML.
+pub def escape_html(text: String) -> String {
+  text
+  |> string.replace("&", "&amp;")
+  |> string.replace("<", "&lt;")
+  |> string.replace(">", "&gt;")
+  |> string.replace("\"", "&quot;")
+  |> string.replace("'", "&#39;")
+}
+
+// Keep the legacy one-page renderer available for extraction tests and callers.
+// The site generator adds a shared module sidebar and offline assets.
+def module_href(name: String, prefix: String) -> String {
+  prefix <> "modules/" <> name <> ".html"
+}
+
+def navigation(pages: List(Page), prefix: String) -> String {
+  pages
+  |> list.map(fn(p) {
+    href = module_href(p.module, prefix)
+    items =
+      p.entries
+      |> list.map(fn(e) {
+        "<a class=\"declaration-link\" data-search=\"" <> escape_html(
+          p.module <> " " <> e.name <> " " <> e.signature <> " " <> e.documentation,
+        ) <> "\" href=\"" <> href <> "#" <> escape_html(
+          e.name,
+        ) <> "\">" <> escape_html(e.name) <> "</a>"
+      })
+      |> string.join("\n")
+    "<div class=\"module-group\" data-module=\"" <> escape_html(
+      p.module,
+    ) <> "\"><div class=\"module-row\"><button class=\"module-expander\" type=\"button\" aria-expanded=\"false\" aria-label=\"Expand " <> escape_html(
+      p.module,
+    ) <> "\">▸</button><a class=\"module-overview\" data-search=\"" <> escape_html(
+      p.module <> " " <> p.documentation,
+    ) <> "\" href=\"" <> href <> "\">" <> escape_html(
+      p.module,
+    ) <> "</a></div><div class=\"module-children\" hidden><a class=\"overview-link\" data-search=\"" <> escape_html(
+      p.module <> " overview " <> p.documentation,
+    ) <> "\" href=\"" <> href <> "\">Overview</a>" <> items <> "</div></div>"
+  })
+  |> string.join("\n")
+}
+
+def document(
+  title: String,
+  content: String,
+  pages: List(Page),
+  prefix: String,
+  package: String,
+) -> String {
+  "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" <> escape_html(
+    title,
+  ) <> " · Bea Docs</title><link rel=\"stylesheet\" href=\"" <> prefix <> "assets/docs.css\"></head><body>" <> "<header class=\"topbar\"><button id=\"mobile-menu\" class=\"mobile-menu\" aria-label=\"Toggle navigation\" aria-expanded=\"false\">☰</button><a class=\"brand\" href=\"" <> prefix <> "index.html\"><img src=\"" <> prefix <> "assets/beatrix.svg\" alt=\"Beatrix\"> <span>Bea Docs</span></a><span class=\"package\">" <> escape_html(
+    package,
+  ) <> "</span></header>" <> "<div class=\"layout\"><aside class=\"sidebar\" id=\"docs-sidebar\"><input class=\"search\" id=\"docs-search\" type=\"search\" placeholder=\"Search documentation…\" aria-label=\"Search documentation\"><div id=\"search-count\" class=\"results\"></div><div class=\"section-title\">Modules</div>" <> navigation(
+    pages,
+    prefix,
+  ) <> "</aside><main class=\"page\">" <> content <> "<footer class=\"foot\">Generated by Bea · Static, offline documentation</footer></main></div><script src=\"" <> prefix <> "assets/docs.js\" defer></script></body></html>"
+}
+
+// Raw Markdown is stored in a text node, never inserted into HTML unescaped.
+// JavaScript renders a constrained safe Markdown subset at page load.
+def markdown(text: String) -> String {
+  "<div class=\"description markdown-source\">" <> escape_html(text) <> "</div>"
+}
+
+def signature(text: String) -> String {
+  "<div class=\"code-shell signature\"><div class=\"code-toolbar\"><span>bea</span><button class=\"wrap-toggle\" type=\"button\">Wrap</button></div><pre><code data-lang=\"bea\">" <> escape_html(
+    text,
+  ) <> "</code></pre></div>"
+}
+
+pub def render(page: Page) -> String {
+  render_site(page, [page], "../", "Bea")
+}
+
+def render_site(
+  page: Page,
+  pages: List(Page),
+  prefix: String,
+  package: String,
+) -> String {
+  entries =
+    page.entries
+    |> list.map(fn(e) {
+      "<article class=\"entry\" data-search=\"" <> escape_html(
+        e.name <> " " <> e.signature <> " " <> e.documentation,
+      ) <> "\" id=\"" <> escape_html(e.name) <> "\"><h3>" <> escape_html(
+        e.name,
+      ) <> "</h3>" <> signature(e.signature) <> markdown(
+        e.documentation,
+      ) <> "</article>"
+    })
+    |> string.join("\n")
+  document(
+    page.module,
+    "<div class=\"eyebrow\">Module</div><h1>" <> escape_html(
+      page.module,
+    ) <> "</h1>" <> markdown(
+      page.documentation,
+    ) <> "<h2>Public API</h2>" <> entries,
+    pages,
+    prefix,
+    package,
+  )
+}
+
+pub def index(pages: List(Page), package: String) -> String {
+  links =
+    pages
+    |> list.map(fn(p) {
+      "<div class=\"module-card\" data-search=\"" <> escape_html(
+        p.module <> " " <> p.documentation,
+      ) <> "\"><a href=\"" <> module_href(p.module, "") <> "\">" <> escape_html(
+        p.module,
+      ) <> "</a><small>" <> int.to_string(
+        list.length(p.entries),
+      ) <> " public declarations</small></div>"
+    })
+    |> string.join("\n")
+  document(
+    package,
+    "<div class=\"eyebrow\">API Reference</div><h1>" <> escape_html(
+      package,
+    ) <> "</h1><p class=\"description\">Browse modules and public API declarations.</p><h2>Modules</h2>" <> links,
+    pages,
+    "",
+    package,
+  )
+}
+
+/// Build static docs. Parsing failures abort before any HTML is written.
+pub def build(p: Project, out: String) -> Result(Int, String) {
+  files =
+    project.source_files(p.src_dir)
+    |> list.filter(fn(f) { string.ends_with(f, ".bea") })
+    |> list.sort(string.compare)
+  pages = list.fold(files, Ok([]), fn(acc, file) {
+    case acc, simplifile.read(file) {
+      Error(e), _ -> Error(e)
+      _, Error(_) -> Error("Cannot read " <> file)
+      Ok(pages), Ok(source) -> {
+        parsed = parser.parse_module(source)
+        case parsed.errors {
+          [] -> {
+            relative = string.replace(file, p.src_dir <> "/", "")
+            name = string.replace(relative, ".bea", "")
+            Ok([extract(name, parsed.module) | pages])
+          }
+          _ -> Error("Cannot generate docs: invalid Bea source in " <> file)
+        }
+      }
+    }
+  })
+  case pages {
+    Error(e) -> Error(e)
+    Ok(reversed) -> {
+      pages = list.reverse(reversed)
+      _ = simplifile.create_directory_all(out <> "/modules")
+      writes = list.map(pages, fn(page) {
+        path = out <> "/modules/" <> page.module <> ".html"
+        _ = simplifile.create_directory_all(project.dirname(path))
+        simplifile.write(
+          path,
+          render_site(
+            page,
+            pages,
+            string.repeat("../", list.length(string.split(page.module, "/"))),
+            p.name,
+          ),
+        )
+      })
+      case list.all(writes, fn(r) { result.is_ok(r) }) {
+        False -> Error("Could not write documentation pages to " <> out)
+        True -> {
+          _ = simplifile.create_directory_all(out <> "/assets")
+          resources = [
+            ("docs.css", docs_assets.css),
+            ("docs.js", docs_assets.js),
+            ("beatrix.svg", docs_assets.logo),
+          ]
+          assets_ok = list.all(resources, fn(asset) {
+            simplifile.write(out <> "/assets/" <> asset.0, asset.1)
+            |> result.is_ok
+          })
+          case assets_ok {
+            False -> Error("Could not write documentation assets to " <> out)
+            True -> case simplifile.write(
+              out <> "/index.html",
+              index(pages, p.name),
+            ) {
+              Ok(_) -> Ok(list.length(pages))
+              Error(_) ->
+                Error("Could not write documentation index to " <> out)
+            }
+          }
+        }
+      }
+    }
+  }
+}

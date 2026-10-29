@@ -7,6 +7,7 @@
 import bea/codegen
 import bea/compiler
 import bea/diagnostic
+import bea/docs
 import bea/entrypoint
 import bea/formatter
 import bea/gleam_output
@@ -28,7 +29,6 @@ import gleam/result
 import gleam/string
 import simplifile
 import gleam/erlang/atom
-
 
 def version() -> String {
   system.app_version(atom.create("bea"))
@@ -57,6 +57,7 @@ pub def main(args: List(String)) -> Int {
     ["clean"] -> clean()
     ["check" | rest] -> compile_command("check", rest)
     ["build" | rest] -> compile_command("build", rest)
+    ["docs" | rest] -> docs_command(rest)
     ["run" | rest] -> run(rest)
     ["format" | rest] | ["fmt" | rest] -> format(rest)
     ["transpile" | rest] -> transpile(rest)
@@ -122,6 +123,7 @@ def help() -> String {
     heading("Building"),
     command("check", "", "Type check the project"),
     command("build", "", "Build the project"),
+    command("docs", "[--out DIR]", "Generate static public API documentation"),
     command(
       "test",
       "[ARGS]",
@@ -300,6 +302,33 @@ def run_gleam(p: Project, s: project.Sync, args: List(String)) -> Int {
         system.print_stderr(l <> "\n")
       })
       code
+    }
+  }
+}
+
+/// Generate static HTML from public Bea declarations and documentation comments.
+def docs_command(args: List(String)) -> Int {
+  case args {
+    [] | ["--out", _] -> {
+      use p <- or_exit(current_project())
+      out = case args {
+        ["--out", dir] -> system.absolute_path(dir)
+        _ -> p.root <> "/build/docs"
+      }
+      case docs.build(p, out) {
+        Ok(count) -> {
+          status("Documented", int.to_string(count) <> " modules to " <> out)
+          0
+        }
+        Error(message) -> {
+          error(message)
+          1
+        }
+      }
+    }
+    _ -> {
+      error("Usage: bea docs [--out DIR]")
+      1
     }
   }
 }

@@ -995,3 +995,14 @@ generation reach the compiler itself: the first build is compiled by the
 holds programs with expected output that cover the remaining exercism concepts
 (let assertions, bit arrays, IO/Nil, opaque and phantom types, external
 functions, `use`) and Bea's own features.
+
+### Generate API documentation
+
+Run `bea docs` to generate a static HTML reference from `////` module comments,
+`///` declaration comments, and the public API of Bea source modules. The
+output is `build/docs/index.html` by default; use `bea docs --out DIR` to choose
+another directory. Private declarations are excluded. The generated site includes Beatrix branding, a collapsible module sidebar,
+client-side public API search, Markdown documentation, language-aware code
+highlighting, and a persistent code-wrapping toggle. All assets are embedded
+in the compiler and written to `build/docs/assets/`, so the generated site
+works offline without a separate documentation server.
